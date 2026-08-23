@@ -2,6 +2,22 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CropRect, RosterPage } from '../models/roster';
 import { StripCropper } from './StripCropper';
 
+/**
+ * Fixed zoom stops rather than free pinch: a roster only ever needs
+ * "fitted" or "close enough to see a day column", and discrete steps
+ * cannot land on an awkward fraction mid-drag.
+ */
+export const ZOOM_STEPS = [1, 1.5, 2, 3, 4] as const;
+export const MAX_ZOOM = ZOOM_STEPS[ZOOM_STEPS.length - 1];
+
+export function zoomIn(z: number): number {
+  return ZOOM_STEPS.find((s) => s > z) ?? MAX_ZOOM;
+}
+
+export function zoomOut(z: number): number {
+  return [...ZOOM_STEPS].reverse().find((s) => s < z) ?? ZOOM_STEPS[0];
+}
+
 interface Props {
   page: RosterPage;
   month: string;
@@ -42,7 +58,8 @@ export function AlignmentEditor({
 }: Props) {
   const stageRef = useRef<HTMLDivElement>(null);
   const holderRef = useRef<HTMLDivElement>(null);
-  const [displayWidth, setDisplayWidth] = useState(0);
+  const [fitWidth, setFitWidth] = useState(0);
+  const [zoom, setZoom] = useState(1);
 
   // Mount the working canvas directly - no second copy, no data URL.
   useEffect(() => {
@@ -52,15 +69,28 @@ export function AlignmentEditor({
     return () => holder.replaceChildren();
   }, [page]);
 
+  // A new page starts fitted again.
+  useEffect(() => setZoom(1), [page]);
+
   useLayoutEffect(() => {
     const el = stageRef.current;
     if (!el) return;
-    const update = () => setDisplayWidth(el.clientWidth);
+    const update = () => setFitWidth(el.clientWidth);
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  /**
+   * Zoom is done by laying the canvas out wider and letting the stage
+   * scroll, not by transforming it. Band rectangles stay in source-image
+   * pixels either way - all that changes is the number they are
+   * multiplied by to be drawn, so no geometry can drift with the view.
+   */
+  const displayWidth = Math.round(fitWidth * zoom);
+  const canZoomIn = zoom < MAX_ZOOM;
+  const canZoomOut = zoom > 1;
 
   return (
     <section>
@@ -74,30 +104,69 @@ export function AlignmentEditor({
       </div>
 
       <div className="stage" ref={stageRef}>
-        <div ref={holderRef} />
-        {displayWidth > 0 && (
-          <>
-            <StripCropper
-              label="Dates"
-              variant="date"
-              rect={dateStrip}
-              sourceWidth={page.width}
-              sourceHeight={page.height}
-              displayWidth={displayWidth}
-              onChange={onDateStrip}
-            />
-            <StripCropper
-              label="My row"
-              variant="employee"
-              rect={employeeStrip}
-              sourceWidth={page.width}
-              sourceHeight={page.height}
-              displayWidth={displayWidth}
-              onChange={onEmployeeStrip}
-            />
-          </>
-        )}
+        <div className="zoom-layer" style={{ width: displayWidth || undefined }}>
+          <div className="canvas-box">
+            <div ref={holderRef} />
+            {displayWidth > 0 && (
+              <>
+                <StripCropper
+                  label="Dates"
+                  variant="date"
+                  rect={dateStrip}
+                  sourceWidth={page.width}
+                  sourceHeight={page.height}
+                  displayWidth={displayWidth}
+                  onChange={onDateStrip}
+                />
+                <StripCropper
+                  label="My row"
+                  variant="employee"
+                  rect={employeeStrip}
+                  sourceWidth={page.width}
+                  sourceHeight={page.height}
+                  displayWidth={displayWidth}
+                  onChange={onEmployeeStrip}
+                />
+              </>
+            )}
+          </div>
+        </div>
       </div>
+
+      <div className="zoom-bar">
+        <button
+          type="button"
+          onClick={() => setZoom((z) => zoomOut(z))}
+          disabled={!canZoomOut}
+          aria-label="Zoom out"
+        >
+          &minus;
+        </button>
+        <span className="zoom-level" aria-live="polite">
+          {Math.round(zoom * 100)}%
+        </span>
+        <button
+          type="button"
+          onClick={() => setZoom((z) => zoomIn(z))}
+          disabled={!canZoomIn}
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          className="ghost grow"
+          onClick={() => setZoom(1)}
+          disabled={zoom === 1}
+        >
+          Fit
+        </button>
+      </div>
+      {zoom > 1 && (
+        <p className="muted" style={{ marginTop: 4 }}>
+          Drag the picture to move around it. Dragging a band still moves the band.
+        </p>
+      )}
 
       <div className="card" style={{ marginTop: 12 }}>
         <label className="field">

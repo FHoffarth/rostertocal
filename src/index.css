@@ -166,13 +166,29 @@ label.field > span {
 
 /* ---------- alignment ---------- */
 
+/* The stage scrolls; zoom widens the layer inside it rather than
+   transforming anything, so band geometry never passes through a
+   transform matrix. One-finger drag pans; bands opt out below. */
 .stage {
   position: relative;
   width: 100%;
-  overflow: hidden;
+  max-width: 100%;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
   border-radius: 10px;
   background: #000;
-  touch-action: none;
+  touch-action: pan-x pan-y;
+  overscroll-behavior: contain;
+}
+/* Room above and below for the top/bottom handles, which overhang the
+   band itself. Without it the scroller would clip them. */
+.zoom-layer {
+  padding: 28px 0;
+  min-width: 100%;
+}
+.canvas-box {
+  position: relative;
+  width: 100%;
 }
 .stage canvas {
   display: block;
@@ -180,10 +196,31 @@ label.field > span {
   height: auto;
 }
 
+.zoom-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.zoom-bar button {
+  min-width: var(--tap);
+  padding: 0 12px;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.zoom-bar .zoom-level {
+  min-width: 52px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .strip {
   position: absolute;
   border: 2px solid var(--accent);
   background: rgba(79, 140, 255, 0.14);
+  /* Dragging a band must never be interpreted as panning the stage. */
   touch-action: none;
 }
 .strip.employee {
@@ -239,12 +276,12 @@ label.field > span {
   cursor: ns-resize;
 }
 .strip .handle.w {
-  left: calc(var(--tap) / -2);
+  left: 0;
   top: calc(50% - var(--tap) / 2);
   cursor: ns-resize;
 }
 .strip .handle.e {
-  right: calc(var(--tap) / -2);
+  right: 0;
   top: calc(50% - var(--tap) / 2);
   cursor: ns-resize;
 }

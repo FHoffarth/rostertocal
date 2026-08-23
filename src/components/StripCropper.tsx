@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react';
 import type { CropRect } from '../models/roster';
 
-type Mode = 'move' | 'n' | 's' | 'w' | 'e';
+export type Mode = 'move' | 'n' | 's' | 'w' | 'e';
 
 interface Props {
   label: string;
@@ -19,6 +19,45 @@ interface Props {
 export const MIN_H = 20;
 
 /**
+ * Apply one drag to a band, in source-image pixels.
+ *
+ * Pure on purpose: this is the only place a gesture turns into geometry,
+ * so it is the thing that has to stay correct when the view zooms. The
+ * caller converts screen movement into source pixels first; nothing in
+ * here knows or cares what the current zoom is.
+ */
+export function applyBandDrag(
+  mode: Mode,
+  start: CropRect,
+  dySource: number,
+  sourceWidth: number,
+  sourceHeight: number,
+): CropRect {
+  const s = start;
+  const skew = s.skew ?? 0;
+  let next: CropRect;
+  switch (mode) {
+    case 'move':
+      next = { ...s, y: s.y + dySource };
+      break;
+    case 'n':
+      next = { ...s, y: s.y + dySource, h: s.h - dySource };
+      break;
+    case 's':
+      next = { ...s, h: s.h + dySource };
+      break;
+    case 'w':
+      // Lift the left end; the right end stays where it is.
+      next = { ...s, y: s.y + dySource, skew: skew - dySource };
+      break;
+    case 'e':
+      next = { ...s, skew: skew + dySource };
+      break;
+  }
+  return clampBand(next, sourceWidth, sourceHeight);
+}
+
+/**
  * One anchor band over the roster preview.
  *
  * The band spans the page and has two ends: drag the left or right
@@ -26,8 +65,9 @@ export const MIN_H = 20;
  * covers the tilt every hand-held photo has, without asking anyone to
  * rotate an image by hand.
  *
- * Handles are 48px touch targets that overhang the band, so a thumb
- * never has to hit a 2px border.
+ * Handles are 48px touch targets. The two end handles sit inside the
+ * band's own width so they stay reachable on a 320px screen; the top and
+ * bottom ones overhang into the padding the scroller reserves for them.
  */
 export function StripCropper({
   label,
@@ -64,28 +104,7 @@ export function StripCropper({
       e.preventDefault();
       // Screen delta -> source-pixel delta.
       const dy = (e.clientY - d.y) / scale;
-      const s = d.start;
-      const skew = s.skew ?? 0;
-      let next: CropRect;
-      switch (d.mode) {
-        case 'move':
-          next = { ...s, y: s.y + dy };
-          break;
-        case 'n':
-          next = { ...s, y: s.y + dy, h: s.h - dy };
-          break;
-        case 's':
-          next = { ...s, h: s.h + dy };
-          break;
-        case 'w':
-          // Lift the left end: the right end stays where it is.
-          next = { ...s, y: s.y + dy, skew: skew - dy };
-          break;
-        case 'e':
-          next = { ...s, skew: skew + dy };
-          break;
-      }
-      onChange(clampBand(next, sourceWidth, sourceHeight));
+      onChange(applyBandDrag(d.mode, d.start, dy, sourceWidth, sourceHeight));
     },
     [onChange, scale, sourceWidth, sourceHeight],
   );
