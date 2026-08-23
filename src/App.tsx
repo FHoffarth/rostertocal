@@ -1,0 +1,284 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { UploadStep } from './components/UploadStep';
+import { AlignmentEditor } from './components/AlignmentEditor';
+import { ShiftMatrixEditor } from './components/ShiftMatrixEditor';
+import { ShiftBottomSheet } from './components/ShiftBottomSheet';
+import { ExportStep } from './components/ExportStep';
+import type { CropRect, RosterPage } from './models/roster';
+import { RecognitionSource, type DayShift, type ShiftDef } from './models/shifts';
+import { isPdf, loadImageFile, releasePage } from './lib/imageLoader';
+import type { PdfTextPage } from './lib/pdfExtractor';
+import { defaultStrips } from './lib/stripCropper';
+import { runRecognition, type PipelineMetrics } from './lib/recognitionPipeline';
+import {
+  loadShiftMemory,
+  saveShiftMemory,
+  upsertDef,
+  type ShiftMemoryPayload,
+} from './lib/shiftMemory';
+
+type Step = 'upload' | 'align' | 'confirm' | 'export';
+
+const STEPS: Step[] = ['upload', 'align', 'confirm', 'export'];
+
+function currentMonth(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+export default function App() {
+  const [step, setStep] = useState<Step>('upload');
+  const [page, setPage] = useState<RosterPage | null>(null);
+  const [textPage, setTextPage] = useState<PdfTextPage | null>(null);
+  const [dateStrip, setDateStrip] = useState<CropRect>({ x: 0, y: 0, w: 1, h: 1 });
+  const [employeeStrip, setEmployeeStrip] = useState<CropRect>({ x: 0, y: 0, w: 1, h: 1 });
+  const [month, setMonth] = useState(currentMonth());
+  const [days, setDays] = useState<DayShift[]>([]);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [metrics, setMetrics] = useState<PipelineMetrics | null>(null);
+  const [loadMs, setLoadMs] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [openDay, setOpenDay] = useState<string | null>(null);
+  const [memory, setMemory] = useState<ShiftMemoryPayload>(() => loadShiftMemory());
+
+  // The File is held only long enough to raster/extract; never uploaded.
+  const fileRef = useRef<File | null>(null);
+  const pageRef = useRef<RosterPage | null>(null);
+  pageRef.current = page;
+
+  // One OCR worker per session, torn down with the page.
+  useEffect(() => {
+    return () => {
+      // Only reach for the OCR module if this session actually loaded it.
+      void import('./lib/ocrWorker').then((m) => m.terminateOcrWorker());
+      releasePage(pageRef.current);
+    };
+  }, []);
+
+  const persist = useCallback((next: ShiftMemoryPayload) => {
+    setMemory(next);
+    saveShiftMemory(next);
+  }, []);
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      setBusy(true);
+      setError(null);
+      const t0 = performance.now();
+      try {
+        releasePage(pageRef.current);
+        fileRef.current = file;
+        let loaded: RosterPage;
+        let text: PdfTextPage | null = null;
+
+        if (isPdf(file)) {
+          // pdf.js is ~1.3 MB with its worker; image users never load it.
+          const pdf = await import('./lib/pdfExtractor');
+          // Native text first; OCR only if the text layer is unusable.
+          const roster = await pdf.openPdfRoster(file, 1);
+          loaded = roster.page;
+          text = roster.textPage;
+        } else {
+          loaded = await loadImageFile(file);
+        }
+
+        const strips = defaultStrips(loaded.width, loaded.height);
+        setPage(loaded);
+        setTextPage(text);
+        setDateStrip(strips.dateStrip);
+        setEmployeeStrip(strips.employeeStrip);
+        setDays([]);
+        setWarnings([]);
+        setMetrics(null);
+        setLoadMs(performance.now() - t0);
+        setStep('align');
+      } catch (e) {
+        setError((e as Error).message || 'Could not read that file.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  const knownCodes = useMemo(() => memory.defs.map((d) => d.code), [memory.defs]);
+
+  const recognize = useCallback(async () => {
+    if (!page) return;
+    setBusy(true);
+    setError(null);
+    setProgress(textPage ? 'Reading PDF text…' : 'Recognising…');
+    try {
+      const r = await runRecognition({
+        page,
+        textPage,
+        dateStrip,
+        employeeStrip,
+        month,
+        knownCodes,
+      });
+      setMetrics(r.metrics);
+      setWarnings(r.warnings);
+      if (!r.ok) {
+        setError(
+          r.failure ??
+            'Could not line the dates up. Move the blue band onto the row of day numbers.',
+        );
+        return;
+      }
+      setDays(r.days);
+      setStep('confirm');
+    } catch (e) {
+      setError((e as Error).message || 'Recognition failed on this device.');
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }, [page, textPage, dateStrip, employeeStrip, month, knownCodes]);
+
+  const setDay = useCallback((dateStr: string, patch: Partial<DayShift>) => {
+    setDays((prev) => prev.map((d) => (d.dateStr === dateStr ? { ...d, ...patch } : d)));
+  }, []);
+
+  const pickShift = useCallback(
+    (dateStr: string, code: string) => {
+      setDay(dateStr, {
+        shiftCode: code,
+        confidence: 1,
+        source: RecognitionSource.USER_CONFIRMED,
+        confirmed: true,
+      });
+      setOpenDay(null);
+    },
+    [setDay],
+  );
+
+  const clearShift = useCallback(
+    (dateStr: string) => {
+      setDay(dateStr, {
+        shiftCode: null,
+        confidence: 0,
+        source: RecognitionSource.USER_CONFIRMED,
+        confirmed: false,
+      });
+      setOpenDay(null);
+    },
+    [setDay],
+  );
+
+  const createDef = useCallback(
+    (def: ShiftDef) => {
+      persist({ ...memory, defs: upsertDef(memory.defs, def) });
+    },
+    [memory, persist],
+  );
+
+  /** The explicit review step: everything still open is accepted as read. */
+  const confirmAll = useCallback(() => {
+    setDays((prev) => prev.map((d) => ({ ...d, confirmed: true })));
+  }, []);
+
+  const restart = useCallback(() => {
+    releasePage(pageRef.current);
+    fileRef.current = null;
+    setPage(null);
+    setTextPage(null);
+    setDays([]);
+    setWarnings([]);
+    setMetrics(null);
+    setError(null);
+    setStep('upload');
+  }, []);
+
+  const metricsLine = metrics
+    ? [
+        loadMs !== null ? `load ${Math.round(loadMs)} ms` : null,
+        `dates ${Math.round(metrics.dateOcrMs)} ms`,
+        `row ${Math.round(metrics.rowOcrMs)} ms`,
+        metrics.retriedCells
+          ? `${metrics.retriedCells} retried ${Math.round(metrics.retryOcrMs)} ms`
+          : null,
+        `total ${Math.round(metrics.totalMs)} ms`,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : null;
+
+  const openDayShift = days.find((d) => d.dateStr === openDay) ?? null;
+  const stepIndex = STEPS.indexOf(step);
+
+  return (
+    <main>
+      <h1>RosterToCal</h1>
+      <div className="privacy" role="note">
+        <span aria-hidden="true">🔒</span>
+        <span>Your roster stays on this device. No upload, no account.</span>
+      </div>
+      <div className="steps" aria-hidden="true">
+        {STEPS.map((s, i) => (
+          <span key={s} className={i < stepIndex ? 'done' : i === stepIndex ? 'current' : ''} />
+        ))}
+      </div>
+
+      {step === 'upload' && <UploadStep onFile={handleFile} busy={busy} error={error} />}
+
+      {step === 'align' && page && (
+        <AlignmentEditor
+          page={page}
+          month={month}
+          dateStrip={dateStrip}
+          employeeStrip={employeeStrip}
+          usingPdfText={Boolean(textPage)}
+          busy={busy}
+          progress={progress}
+          error={error}
+          onMonthChange={setMonth}
+          onDateStrip={setDateStrip}
+          onEmployeeStrip={setEmployeeStrip}
+          onRecognize={recognize}
+          onBack={restart}
+        />
+      )}
+
+      {step === 'confirm' && (
+        <ShiftMatrixEditor
+          days={days}
+          defs={memory.defs}
+          warnings={warnings}
+          metricsLine={metricsLine}
+          onOpenDay={setOpenDay}
+          onConfirmAll={confirmAll}
+          onContinue={() => setStep('export')}
+          onBack={() => setStep('align')}
+        />
+      )}
+
+      {step === 'export' && (
+        <ExportStep
+          days={days}
+          defs={memory.defs}
+          month={month}
+          alarmMinutesBefore={memory.alarmMinutesBefore}
+          onAlarmChange={(v) => persist({ ...memory, alarmMinutesBefore: v })}
+          onBack={() => setStep('confirm')}
+          onRestart={restart}
+        />
+      )}
+
+      {openDayShift && (
+        <ShiftBottomSheet
+          dateStr={openDayShift.dateStr}
+          currentCode={openDayShift.shiftCode}
+          rawText={openDayShift.rawText}
+          defs={memory.defs}
+          onPick={(code) => pickShift(openDayShift.dateStr, code)}
+          onClear={() => clearShift(openDayShift.dateStr)}
+          onCreate={createDef}
+          onClose={() => setOpenDay(null)}
+        />
+      )}
+    </main>
+  );
+}
