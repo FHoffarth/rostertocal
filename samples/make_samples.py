@@ -191,3 +191,60 @@ if __name__ == "__main__":
     for p in (pdf, jpg):
         print(f"{os.path.basename(p)}  {os.path.getsize(p) / 1024:.0f} KB")
     print(f"expected employee row ({ME}): {' '.join(SHIFTS)}")
+
+
+# --------------------------------------------------------------------
+# perspective fixture
+# --------------------------------------------------------------------
+
+def _perspective_coeffs(src_quad, dst_quad):
+    """Solve the 8 coefficients PIL wants for Image.PERSPECTIVE.
+
+    PIL maps *output* -> *input*, so pass the destination corners as the
+    source of the solve. Plain least squares on 8 equations, no deps.
+    """
+    matrix = []
+    for (dx, dy), (sx, sy) in zip(dst_quad, src_quad):
+        matrix.append([dx, dy, 1, 0, 0, 0, -sx * dx, -sx * dy])
+        matrix.append([0, 0, 0, dx, dy, 1, -sy * dx, -sy * dy])
+    # Gaussian elimination on the 8x8 system.
+    b = []
+    for (sx, sy) in src_quad:
+        b.extend([sx, sy])
+    n = 8
+    for i in range(n):
+        pivot = max(range(i, n), key=lambda r: abs(matrix[r][i]))
+        matrix[i], matrix[pivot] = matrix[pivot], matrix[i]
+        b[i], b[pivot] = b[pivot], b[i]
+        for r in range(i + 1, n):
+            f = matrix[r][i] / matrix[i][i]
+            for c in range(i, n):
+                matrix[r][c] -= f * matrix[i][c]
+            b[r] -= f * b[i]
+    x = [0.0] * n
+    for i in reversed(range(n)):
+        x[i] = (b[i] - sum(matrix[i][c] * x[c] for c in range(i + 1, n))) / matrix[i][i]
+    return x
+
+
+def make_perspective_photo(path: str) -> None:
+    """A roster shot from an angle: the far end is smaller and higher.
+
+    This is the case the old two-ended band could not express at all -
+    it could tilt a row but never taper it.
+    """
+    flat = os.path.join(HERE, "sample-roster-photo.jpg")
+    img = Image.open(flat).convert("RGB")
+    w, h = img.size
+
+    # Where the four corners of the flat picture end up in the shot.
+    dst = [(0, 0), (w, 0), (w, h), (0, h)]
+    src = [
+        (int(w * 0.10), int(h * 0.06)),   # top-left pulled in and down
+        (int(w * 0.97), int(h * 0.20)),   # top-right pushed down: camera tilted
+        (int(w * 0.99), int(h * 0.80)),
+        (int(w * 0.03), int(h * 0.97)),
+    ]
+    coeffs = _perspective_coeffs(src, dst)
+    warped = img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BICUBIC, fillcolor="white")
+    warped.save(path, "JPEG", quality=72)

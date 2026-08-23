@@ -1,26 +1,20 @@
 import type { DayShift } from './shifts';
 
 /**
- * A crop band in *source image* pixel coordinates.
+ * An axis-aligned rectangle in pixels.
  *
- * `skew` is the vertical offset of the band's right end relative to its
- * left end, in source pixels. A photo is never perfectly square-on, and
- * over a 31-column roster even one degree of tilt walks a row clean out
- * of a straight band - so a band has two ends, not one top edge.
+ * Since alignment moved to quadrilaterals this is only ever used inside
+ * an already-rectified strip, where a cell really is a plain rectangle.
+ * `skew` survives solely so an old saved band can be converted - see
+ * quadFromBand.
  */
 export interface CropRect {
   x: number;
   y: number;
   w: number;
   h: number;
+  /** Legacy band tilt, for migration only. */
   skew?: number;
-}
-
-/** Vertical offset of the band at a given source x. */
-export function skewAt(rect: CropRect, x: number): number {
-  const skew = rect.skew ?? 0;
-  if (!skew || rect.w <= 0) return 0;
-  return (skew * (x - rect.x)) / rect.w;
 }
 
 /** One recognised token with its horizontal extent in source pixels. */

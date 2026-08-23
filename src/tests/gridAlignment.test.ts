@@ -170,14 +170,42 @@ describe('mapTokensToDays', () => {
   });
 });
 
-describe('cellRects', () => {
-  it('offsets column ranges into the employee strip', () => {
-    const { columns } = buildDayColumns(evenAnchors([1, 2, 3, 4, 5]), 5, 2000);
-    const rects = cellRects(columns, { x: 12, y: 300, w: 400, h: 60 });
+describe('cellRects (inside the rectified strip)', () => {
+  it('turns normalised columns into pixel crops across the strip', () => {
+    const { columns } = buildDayColumns(
+      [1, 2, 3, 4, 5].map((d) => ({ day: d, center: 0.1 + 0.15 * (d - 1) })),
+      5,
+      1,
+    );
+    const rects = cellRects(columns, 900, 60);
     expect(rects).toHaveLength(5);
-    expect(rects[0].y).toBe(300);
+    expect(rects[0].y).toBe(0);
     expect(rects[0].h).toBe(60);
-    expect(rects[0].x).toBeCloseTo(12 + columns[0].x0, 6);
+    expect(rects[0].x).toBeCloseTo(Math.max(0, columns[0].x0) * 900, 6);
     expect(rects[0].w).toBeGreaterThan(0);
+  });
+
+  it('never lets one cell overlap the next', () => {
+    const { columns } = buildDayColumns(
+      Array.from({ length: 8 }, (_, i) => ({ day: i + 1, center: 0.05 + 0.11 * i })),
+      8,
+      1,
+    );
+    const rects = cellRects(columns, 800, 40);
+    for (let i = 1; i < rects.length; i++) {
+      expect(rects[i].x).toBeGreaterThanOrEqual(rects[i - 1].x + rects[i - 1].w - 1e-9);
+    }
+  });
+
+  it('stays inside the strip at both ends', () => {
+    const { columns } = buildDayColumns(
+      Array.from({ length: 6 }, (_, i) => ({ day: i + 1, center: 0.02 + 0.19 * i })),
+      6,
+      1,
+    );
+    const rects = cellRects(columns, 600, 30);
+    expect(rects[0].x).toBeGreaterThanOrEqual(0);
+    const last = rects[rects.length - 1];
+    expect(last.x + last.w).toBeLessThanOrEqual(600 + 1e-9);
   });
 });

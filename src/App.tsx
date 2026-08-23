@@ -4,7 +4,8 @@ import { AlignmentEditor } from './components/AlignmentEditor';
 import { ShiftMatrixEditor } from './components/ShiftMatrixEditor';
 import { ShiftBottomSheet } from './components/ShiftBottomSheet';
 import { ExportStep } from './components/ExportStep';
-import type { CropRect, RosterPage } from './models/roster';
+import type { RosterPage } from './models/roster';
+import { quadFromBand, type QuadSelection } from './models/quad';
 import {
   CellState,
   isBulkAcceptable,
@@ -36,8 +37,13 @@ export default function App() {
   const [step, setStep] = useState<Step>('upload');
   const [page, setPage] = useState<RosterPage | null>(null);
   const [textPage, setTextPage] = useState<PdfTextPage | null>(null);
-  const [dateStrip, setDateStrip] = useState<CropRect>({ x: 0, y: 0, w: 1, h: 1 });
-  const [employeeStrip, setEmployeeStrip] = useState<CropRect>({ x: 0, y: 0, w: 1, h: 1 });
+  // Canonical selections, in source-image pixels.
+  const [dateQuad, setDateQuad] = useState<QuadSelection>(() =>
+    quadFromBand({ x: 0, y: 0, w: 1, h: 1 }),
+  );
+  const [employeeQuad, setEmployeeQuad] = useState<QuadSelection>(() =>
+    quadFromBand({ x: 0, y: 0, w: 1, h: 1 }),
+  );
   const [month, setMonth] = useState(currentMonth());
   const [days, setDays] = useState<DayShift[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -90,11 +96,12 @@ export default function App() {
           loaded = await loadImageFile(file);
         }
 
+        // The default guesses are still bands; they convert exactly.
         const strips = defaultStrips(loaded.width, loaded.height);
         setPage(loaded);
         setTextPage(text);
-        setDateStrip(strips.dateStrip);
-        setEmployeeStrip(strips.employeeStrip);
+        setDateQuad(quadFromBand(strips.dateStrip));
+        setEmployeeQuad(quadFromBand(strips.employeeStrip));
         setDays([]);
         setWarnings([]);
         setMetrics(null);
@@ -120,8 +127,8 @@ export default function App() {
       const r = await runRecognition({
         page,
         textPage,
-        dateStrip,
-        employeeStrip,
+        dateQuad,
+        employeeQuad,
         month,
         knownCodes,
       });
@@ -142,7 +149,7 @@ export default function App() {
       setBusy(false);
       setProgress(null);
     }
-  }, [page, textPage, dateStrip, employeeStrip, month, knownCodes]);
+  }, [page, textPage, dateQuad, employeeQuad, month, knownCodes]);
 
   const setDay = useCallback((dateStr: string, patch: Partial<DayShift>) => {
     setDays((prev) => prev.map((d) => (d.dateStr === dateStr ? { ...d, ...patch } : d)));
@@ -218,6 +225,8 @@ export default function App() {
   const metricsLine = metrics
     ? [
         loadMs !== null ? `load ${Math.round(loadMs)} ms` : null,
+        metrics.rectifyMs ? `rectify ${Math.round(metrics.rectifyMs)} ms` : null,
+        metrics.rowStripPx !== 'pdf-text' ? `strip ${metrics.rowStripPx}` : null,
         `dates ${Math.round(metrics.dateOcrMs)} ms`,
         `row ${Math.round(metrics.rowOcrMs)} ms`,
         metrics.verifiedCells
@@ -252,15 +261,15 @@ export default function App() {
         <AlignmentEditor
           page={page}
           month={month}
-          dateStrip={dateStrip}
-          employeeStrip={employeeStrip}
+          dateQuad={dateQuad}
+          employeeQuad={employeeQuad}
           usingPdfText={Boolean(textPage)}
           busy={busy}
           progress={progress}
           error={error}
           onMonthChange={setMonth}
-          onDateStrip={setDateStrip}
-          onEmployeeStrip={setEmployeeStrip}
+          onDateQuad={setDateQuad}
+          onEmployeeQuad={setEmployeeQuad}
           onRecognize={recognize}
           onBack={restart}
         />

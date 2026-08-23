@@ -179,18 +179,20 @@ describe('multi-character codes survive the boundary', () => {
 });
 
 describe('cells cannot steal a neighbour glyph', () => {
+  // Columns are normalised along the rectified row: 0 = start, 1 = end.
   const anchors = Array.from({ length: 10 }, (_, i) => ({
     day: i + 1,
-    center: 100 + 60 * i,
+    center: 0.1 + 0.06 * i,
   }));
-  const { columns } = buildDayColumns(anchors, 10, 1000);
+  const { columns } = buildDayColumns(anchors, 10, 1);
+  const STRIP_W = 1000;
+  const STRIP_H = 50;
 
   it('a cell crop never reaches past its own column', () => {
-    const strip = { x: 0, y: 200, w: 1000, h: 50 };
-    const rects = cellRects(columns, strip);
+    const rects = cellRects(columns, STRIP_W, STRIP_H);
     rects.forEach((r, i) => {
-      expect(r.x).toBeGreaterThanOrEqual(columns[i].x0 - 1e-9);
-      expect(r.x + r.w).toBeLessThanOrEqual(columns[i].x1 + 1e-9);
+      expect(r.x).toBeGreaterThanOrEqual(columns[i].x0 * STRIP_W - 1e-9);
+      expect(r.x + r.w).toBeLessThanOrEqual(columns[i].x1 * STRIP_W + 1e-9);
     });
     // and no two crops overlap
     for (let i = 1; i < rects.length; i++) {
@@ -220,8 +222,9 @@ describe('cells cannot steal a neighbour glyph', () => {
     const token: OcrToken = {
       text: 'N',
       confidence: 0.9,
-      x0: boundary - 2,
-      x1: boundary + 18,
+      // normalised units: a column is about 0.06 wide
+      x0: boundary - 0.002,
+      x1: boundary + 0.018,
     };
     const { cells } = mapTokensToDays(columns, [token]);
     expect(cells.find((c) => c.day === 5)!.text).toBe('');

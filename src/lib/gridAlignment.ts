@@ -1,4 +1,4 @@
-import { skewAt, type CropRect, type DayColumn, type OcrToken } from '../models/roster';
+import type { CropRect, DayColumn, OcrToken } from '../models/roster';
 
 /**
  * Geometry owns the date -> cell association.
@@ -191,19 +191,28 @@ export function buildDayColumns(
 }
 
 /**
- * Crop rectangles for per-cell OCR of the employee strip.
- * Each cell sits at the band's height *at that column*, so a tilted
- * band still lands on the row it was drawn along.
+ * Crop rectangles for per-cell OCR, inside the *rectified* strip.
+ *
+ * By this point the row has already been flattened, so a cell is a plain
+ * axis-aligned rectangle: all the rotation and perspective was spent in
+ * the rectification. Columns arrive in normalised strip coordinates
+ * (0..1), which is what lets the date strip and the employee strip -
+ * two independent quads with different pixel widths - agree on where a
+ * day is.
  */
-export function cellRects(columns: DayColumn[], strip: CropRect): CropRect[] {
+export function cellRects(
+  columns: DayColumn[],
+  stripWidth: number,
+  stripHeight: number,
+): CropRect[] {
   return columns.map((c) => {
-    const x = strip.x + Math.max(0, c.x0);
-    const centre = strip.x + (Math.max(0, c.x0) + c.x1) / 2;
+    const x0 = Math.max(0, c.x0) * stripWidth;
+    const x1 = Math.min(1, c.x1) * stripWidth;
     return {
-      x,
-      y: strip.y + skewAt(strip, centre),
-      w: Math.max(1, c.x1 - c.x0),
-      h: strip.h,
+      x: x0,
+      y: 0,
+      w: Math.max(1, x1 - x0),
+      h: stripHeight,
     };
   });
 }
@@ -218,7 +227,8 @@ export const GROUP_GAP_FACTOR = 0.7;
  * Character-level OCR hands back "1" and "2" for a column headed 12.
  * Before any of it can be read as a day, adjacent glyphs have to be
  * regrouped - by the gap between them, which is the only signal that
- * does not assume a grid we have not built yet.
+ * does not assume a grid we have not built yet. Works the same in
+ * normalised coordinates, since the threshold is relative.
  */
 export function groupTokens(
   tokens: OcrToken[],

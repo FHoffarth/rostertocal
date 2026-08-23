@@ -1,4 +1,5 @@
-import { skewAt, type CropRect, type OcrToken, type RosterPage } from '../models/roster';
+import type { OcrToken, RosterPage } from '../models/roster';
+import type { QuadSelection } from '../models/quad';
 import {
   CellState,
   RecognitionSource,
@@ -17,6 +18,7 @@ import type { PdfTextPage } from './pdfExtractor';
 import type * as OcrModule from './ocrWorker';
 import { normalizeShiftToken, parseDayToken } from './shiftNormalizer';
 import { cropToCanvas, preprocessForOcr } from './stripCropper';
+import { mapSourceToUnit, rectifyQuad, squareToQuad } from './perspective';
 import { releaseCanvas } from './imageLoader';
 
 /**
@@ -56,14 +58,21 @@ export interface PipelineInput {
   page: RosterPage;
   /** Present only when the PDF carried a usable text layer. */
   textPage?: PdfTextPage | null;
-  dateStrip: CropRect;
-  employeeStrip: CropRect;
+  /** Canonical selection of the date row, in source-image pixels. */
+  dateQuad: QuadSelection;
+  /** Canonical selection of the employee row, in source-image pixels. */
+  employeeQuad: QuadSelection;
   /** "YYYY-MM" */
   month: string;
   knownCodes: string[];
 }
 
 export interface PipelineMetrics {
+  /** Time spent flattening both selections. */
+  rectifyMs: number;
+  /** Rectified strip sizes actually handed to OCR, for the debug line. */
+  dateStripPx: string;
+  rowStripPx: string;
   dateOcrMs: number;
   rowOcrMs: number;
   /** Time spent on the independent cell-local verification pass. */
@@ -101,42 +110,80 @@ function monthLength(month: string): number {
   return daysInMonth(y, m);
 }
 
-/** PDF text tokens live in PDF units; the preview canvas is scaled. */
-function pdfTokensInBand(
+/**
+ * PDF text tokens, placed along the row through the same quad.
+ *
+ * The text layer already knows exactly where every glyph is on the page,
+ * so instead of rasterising and reading it back we push each token
+ * through the inverse of the selection's perspective map. A token inside
+ * the quad comes out with u in 0..1 along the row; anything outside is
+ * dropped rather than nudged in.
+ */
+function pdfTokensInQuad(
   textPage: PdfTextPage,
-  strip: CropRect,
+  quad: QuadSelection,
   canvasWidth: number,
   canvasHeight: number,
 ): OcrToken[] {
   const sx = canvasWidth / textPage.width;
   const sy = canvasHeight / textPage.height;
+  const m = squareToQuad(quad);
   const out: OcrToken[] = [];
   for (const it of textPage.items) {
-    const y = it.y * sy;
     const x0 = it.x0 * sx;
     const x1 = it.x1 * sx;
-    if (x1 < strip.x || x0 > strip.x + strip.w) continue;
-    // The band may be tilted; test against its height at this token.
-    const top = strip.y + skewAt(strip, (x0 + x1) / 2);
-    if (y < top || y > top + strip.h) continue;
-    out.push({ text: it.text, confidence: it.confidence, x0, x1 });
+    const y = it.y * sy;
+    const a = mapSourceToUnit(m, x0, y);
+    const b = mapSourceToUnit(m, x1, y);
+    if (!Number.isFinite(a.x) || !Number.isFinite(b.x)) continue;
+    const v = (a.y + b.y) / 2;
+    if (v < 0 || v > 1) continue;
+    const u0 = Math.min(a.x, b.x);
+    const u1 = Math.max(a.x, b.x);
+    if (u1 < 0 || u0 > 1) continue;
+    out.push({ text: it.text, confidence: it.confidence, x0: u0, x1: u1 });
   }
   return out;
 }
 
-async function ocrBand(source: HTMLCanvasElement, strip: CropRect, charset: string) {
+function stripLabel(s: RectifiedStrip | null): string {
+  return s ? `${s.width}x${s.height}` : 'pdf-text';
+}
+
+/** A row selection, flattened and ready for OCR. */
+interface RectifiedStrip {
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+}
+
+function rectify(source: HTMLCanvasElement, quad: QuadSelection): RectifiedStrip {
+  const r = rectifyQuad(source, quad, OCR_UPSCALE);
+  return { canvas: r.canvas, width: r.width, height: r.height };
+}
+
+/**
+ * OCR a rectified strip and return tokens in *normalised* strip
+ * coordinates (0..1 along the row).
+ *
+ * Normalising here is what lets two independent quads - the date row and
+ * the employee row, with different pixel widths and different
+ * perspectives - be compared at all. Raw source x never had that
+ * property once the rows stopped being parallel.
+ */
+async function ocrStrip(strip: RectifiedStrip, charset: string): Promise<OcrToken[]> {
   const engine = await ocr();
-  const crop = preprocessForOcr(cropToCanvas(source, strip, OCR_UPSCALE));
-  try {
-    const raw = await engine.recognizeStrip(crop, {
-      charset,
-      psm: engine.PSM_BLOCK,
-      granularity: 'symbol',
-    });
-    return engine.tokensToSourceSpace(raw, strip.x, OCR_UPSCALE);
-  } finally {
-    releaseCanvas(crop);
-  }
+  const prepared = preprocessForOcr(strip.canvas);
+  const raw = await engine.recognizeStrip(prepared, {
+    charset,
+    psm: engine.PSM_BLOCK,
+    granularity: 'symbol',
+  });
+  return raw.map((t) => ({
+    ...t,
+    x0: t.x0 / strip.width,
+    x1: t.x1 / strip.width,
+  }));
 }
 
 export interface PassReading {
@@ -219,16 +266,24 @@ export function adjudicateCell(
  */
 export async function runRecognition(input: PipelineInput): Promise<PipelineResult> {
   const t0 = performance.now();
-  const { page, textPage, dateStrip, employeeStrip, month, knownCodes } = input;
+  const { page, textPage, dateQuad, employeeQuad, month, knownCodes } = input;
   const expected = monthLength(month);
   const usingText = Boolean(textPage);
   const warnings: string[] = [];
 
-  // --- date strip -> day anchors -------------------------------------
+  // --- flatten both selections ---------------------------------------
+  // Perspective is spent here, once, on a derived image. The canonical
+  // quads on the source photo are untouched.
+  const tRect = performance.now();
+  const dateStripImg = usingText ? null : rectify(page.canvas, dateQuad);
+  const rowStripImg = usingText ? null : rectify(page.canvas, employeeQuad);
+  const rectifyMs = performance.now() - tRect;
+
+  // --- date strip -> day anchors, in normalised strip coordinates ----
   const tDate = performance.now();
   const dateTokens = usingText
-    ? pdfTokensInBand(textPage!, dateStrip, page.width, page.height)
-    : await ocrBand(page.canvas, dateStrip, (await ocr()).DATE_CHARSET);
+    ? pdfTokensInQuad(textPage!, dateQuad, page.width, page.height)
+    : await ocrStrip(dateStripImg!, (await ocr()).DATE_CHARSET);
   const dateOcrMs = performance.now() - tDate;
 
   // Character-level OCR splits "12" into "1" and "2"; put numbers back
@@ -242,7 +297,10 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
     anchors.push({ day, center: (t.x0 + t.x1) / 2 });
   }
 
-  const alignment = buildDayColumns(anchors, expected, page.width);
+  // Columns live in normalised row coordinates: 0 is the start of the
+  // selected row, 1 is the end. That is the one coordinate system both
+  // selections share.
+  const alignment = buildDayColumns(anchors, expected, 1);
   warnings.push(...alignment.warnings);
 
   if (!alignment.ok) {
@@ -255,6 +313,9 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
       unmappedTokens: 0,
       source: usingText ? RecognitionSource.PDF_TEXT : RecognitionSource.OCR,
       metrics: {
+        rectifyMs,
+        dateStripPx: stripLabel(dateStripImg),
+        rowStripPx: stripLabel(rowStripImg),
         dateOcrMs,
         rowOcrMs: 0,
         cellOcrMs: 0,
@@ -268,8 +329,8 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
   // --- employee strip -> per-day tokens ------------------------------
   const tRow = performance.now();
   const rowTokens = usingText
-    ? pdfTokensInBand(textPage!, employeeStrip, page.width, page.height)
-    : await ocrBand(page.canvas, employeeStrip, (await ocr()).SHIFT_CHARSET);
+    ? pdfTokensInQuad(textPage!, employeeQuad, page.width, page.height)
+    : await ocrStrip(rowStripImg!, (await ocr()).SHIFT_CHARSET);
   const rowOcrMs = performance.now() - tRow;
 
   const mapped = mapTokensToDays(alignment.columns, rowTokens);
@@ -285,24 +346,27 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
   //
   // The crop is exactly the day column - never wider - so a neighbour's
   // glyph cannot be pulled in.
+  // Cells are cut out of the already-flattened row, so each one is a
+  // plain rectangle and no neighbour can lean into it.
   const rects = new Map(
-    cellRects(alignment.columns, employeeStrip).map((r, i) => [
-      alignment.columns[i].day,
-      r,
-    ]),
+    (rowStripImg
+      ? cellRects(alignment.columns, rowStripImg.width, rowStripImg.height)
+      : []
+    ).map((r, i) => [alignment.columns[i].day, r]),
   );
 
   const cellReads = new Map<number, { text: string; confidence: number }>();
   let cellOcrMs = 0;
   let verifiedCells = 0;
 
-  if (!usingText) {
+  if (!usingText && rowStripImg) {
     const tCell = performance.now();
     const engine = await ocr();
     for (const column of alignment.columns) {
       const rect = rects.get(column.day);
       if (!rect) continue;
-      const crop = preprocessForOcr(cropToCanvas(page.canvas, rect, OCR_UPSCALE));
+      // Already upscaled by the rectifier, so crop 1:1 here.
+      const crop = preprocessForOcr(cropToCanvas(rowStripImg.canvas, rect, 1));
       try {
         const tokens = await engine.recognizeStrip(crop, {
           charset: engine.SHIFT_CHARSET,
@@ -385,6 +449,9 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
     });
   }
 
+  releaseCanvas(dateStripImg?.canvas ?? null);
+  releaseCanvas(rowStripImg?.canvas ?? null);
+
   if (disagreements > 0) {
     warnings.push(
       `${disagreements} cell(s) were read differently by the two passes and need your decision`,
@@ -405,6 +472,9 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
     unmappedTokens: mapped.unmapped.length,
     source,
     metrics: {
+      rectifyMs,
+      dateStripPx: stripLabel(dateStripImg),
+      rowStripPx: stripLabel(rowStripImg),
       dateOcrMs,
       rowOcrMs,
       cellOcrMs,

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { CropRect, RosterPage } from '../models/roster';
-import { StripCropper } from './StripCropper';
+import type { RosterPage } from '../models/roster';
+import { validateQuad, type QuadSelection } from '../models/quad';
+import { QuadCropper } from './QuadCropper';
 
 /**
  * Fixed zoom stops rather than free pinch: a roster only ever needs
@@ -8,6 +9,15 @@ import { StripCropper } from './StripCropper';
  * cannot land on an awkward fraction mid-drag.
  */
 export const ZOOM_STEPS = [1, 1.5, 2, 3, 4] as const;
+
+/**
+ * Breathing room the scroller keeps around the picture, in CSS px.
+ * A corner handle is centred on its corner, so at the edge of the image
+ * it overhangs by half a touch target; the fitted width has to leave
+ * space for that or the handle lands outside the visible stage.
+ * Must match the `.zoom-layer` padding.
+ */
+export const STAGE_PADDING = 28;
 export const MAX_ZOOM = ZOOM_STEPS[ZOOM_STEPS.length - 1];
 
 export function zoomIn(z: number): number {
@@ -21,15 +31,15 @@ export function zoomOut(z: number): number {
 interface Props {
   page: RosterPage;
   month: string;
-  dateStrip: CropRect;
-  employeeStrip: CropRect;
+  dateQuad: QuadSelection;
+  employeeQuad: QuadSelection;
   usingPdfText: boolean;
   busy: boolean;
   progress?: string | null;
   error?: string | null;
   onMonthChange: (m: string) => void;
-  onDateStrip: (r: CropRect) => void;
-  onEmployeeStrip: (r: CropRect) => void;
+  onDateQuad: (q: QuadSelection) => void;
+  onEmployeeQuad: (q: QuadSelection) => void;
   onRecognize: () => void;
   onBack: () => void;
 }
@@ -44,15 +54,15 @@ interface Props {
 export function AlignmentEditor({
   page,
   month,
-  dateStrip,
-  employeeStrip,
+  dateQuad,
+  employeeQuad,
   usingPdfText,
   busy,
   progress,
   error,
   onMonthChange,
-  onDateStrip,
-  onEmployeeStrip,
+  onDateQuad,
+  onEmployeeQuad,
   onRecognize,
   onBack,
 }: Props) {
@@ -75,7 +85,7 @@ export function AlignmentEditor({
   useLayoutEffect(() => {
     const el = stageRef.current;
     if (!el) return;
-    const update = () => setFitWidth(el.clientWidth);
+    const update = () => setFitWidth(Math.max(1, el.clientWidth - STAGE_PADDING * 2));
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
@@ -89,6 +99,18 @@ export function AlignmentEditor({
    * multiplied by to be drawn, so no geometry can drift with the view.
    */
   const displayWidth = Math.round(fitWidth * zoom);
+  const displayHeight = page.width
+    ? Math.round((displayWidth * page.height) / page.width)
+    : 0;
+
+  // Geometry is checked before the user can spend time on recognition.
+  const dateCheck = validateQuad(dateQuad, page.width, page.height);
+  const rowCheck = validateQuad(employeeQuad, page.width, page.height);
+  const geometryProblem = !dateCheck.ok
+    ? `Dates: ${dateCheck.reason}`
+    : !rowCheck.ok
+      ? `My row: ${rowCheck.reason}`
+      : null;
   const canZoomIn = zoom < MAX_ZOOM;
   const canZoomOut = zoom > 1;
 
@@ -97,35 +119,42 @@ export function AlignmentEditor({
       <div className="card">
         <h2>Mark the two rows</h2>
         <p className="muted">
-          Blue over the row of dates. Green over your own shift row. Drag the top
-          and bottom circles to fit the row, and the left and right ones to follow
-          a photo that sits slightly crooked.
+          Blue corners around the row of dates, green around your own shift row.
+          Drag each corner onto the row — that handles a crooked or angled photo
+          on its own.
         </p>
       </div>
 
       <div className="stage" ref={stageRef}>
-        <div className="zoom-layer" style={{ width: displayWidth || undefined }}>
-          <div className="canvas-box">
+        <div className="zoom-layer">
+          {/* The explicit width goes on the box the quads are positioned
+              against, never on the padded layer: the padding would
+              otherwise make the overlay wider than the image it covers. */}
+          <div className="canvas-box" style={{ width: displayWidth || undefined }}>
             <div ref={holderRef} />
             {displayWidth > 0 && (
               <>
-                <StripCropper
+                <QuadCropper
                   label="Dates"
                   variant="date"
-                  rect={dateStrip}
+                  quad={dateQuad}
                   sourceWidth={page.width}
                   sourceHeight={page.height}
                   displayWidth={displayWidth}
-                  onChange={onDateStrip}
+                  displayHeight={displayHeight}
+                  invalidReason={dateCheck.ok ? undefined : dateCheck.reason}
+                  onChange={onDateQuad}
                 />
-                <StripCropper
+                <QuadCropper
                   label="My row"
                   variant="employee"
-                  rect={employeeStrip}
+                  quad={employeeQuad}
                   sourceWidth={page.width}
                   sourceHeight={page.height}
                   displayWidth={displayWidth}
-                  onChange={onEmployeeStrip}
+                  displayHeight={displayHeight}
+                  invalidReason={rowCheck.ok ? undefined : rowCheck.reason}
+                  onChange={onEmployeeQuad}
                 />
               </>
             )}
@@ -184,10 +213,15 @@ export function AlignmentEditor({
         </p>
       </div>
 
+      {geometryProblem && <div className="banner err">{geometryProblem}</div>}
       {error && <div className="banner err">{error}</div>}
 
       <div className="sticky-cta">
-        <button className="primary" onClick={onRecognize} disabled={busy || !month}>
+        <button
+          className="primary"
+          onClick={onRecognize}
+          disabled={busy || !month || Boolean(geometryProblem)}
+        >
           {busy ? (progress ?? 'Reading…') : 'Read this roster'}
         </button>
         <button

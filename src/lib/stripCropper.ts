@@ -1,4 +1,4 @@
-import { skewAt, type CropRect } from '../models/roster';
+import type { CropRect } from '../models/roster';
 
 /**
  * Cropping the two anchor strips out of the working canvas.
@@ -13,7 +13,6 @@ export function clampRect(rect: CropRect, w: number, h: number): CropRect {
     y,
     w: Math.max(1, Math.min(rect.w, w - x)),
     h: Math.max(1, Math.min(rect.h, h - y)),
-    skew: rect.skew,
   };
 }
 
@@ -35,23 +34,7 @@ export function cropToCanvas(
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  const skew = r.skew ?? 0;
-  if (skew === 0) {
-    ctx.drawImage(source, r.x, r.y, r.w, r.h, 0, 0, out.width, out.height);
-    return out;
-  }
-
-  // Undo the band's tilt while cropping, so a tilted row comes out
-  // horizontal and OCR sees a clean single line.
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, out.width, out.height);
-  ctx.save();
-  ctx.scale(upscale, upscale);
-  // Vertical shear: a point at source x is lifted by skew * (x - r.x) / r.w.
-  ctx.transform(1, -skew / r.w, 0, 1, 0, 0);
-  ctx.translate(-r.x, -r.y);
-  ctx.drawImage(source, 0, 0);
-  ctx.restore();
+  ctx.drawImage(source, r.x, r.y, r.w, r.h, 0, 0, out.width, out.height);
   return out;
 }
 
@@ -130,6 +113,3 @@ export function defaultStrips(width: number, height: number): {
     employeeStrip: { x: 0, y: Math.round(height * 0.35), w: width, h, skew: 0 },
   };
 }
-
-/** Re-export so callers do not have to reach into the model module. */
-export { skewAt };

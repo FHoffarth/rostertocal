@@ -180,15 +180,18 @@ label.field > span {
   touch-action: pan-x pan-y;
   overscroll-behavior: contain;
 }
-/* Room above and below for the top/bottom handles, which overhang the
-   band itself. Without it the scroller would clip them. */
+/* Room on every side: a corner handle is centred on its corner, so at
+   the edge of the picture it overhangs by half a touch target. Without
+   this the scroller would clip the very handles you need most. */
 .zoom-layer {
-  padding: 28px 0;
+  padding: 28px;
+  width: max-content;
   min-width: 100%;
 }
 .canvas-box {
   position: relative;
   width: 100%;
+  max-width: none;
 }
 .stage canvas {
   display: block;
@@ -216,74 +219,88 @@ label.field > span {
   font-variant-numeric: tabular-nums;
 }
 
-.strip {
+.quad {
   position: absolute;
-  border: 2px solid var(--accent);
-  background: rgba(79, 140, 255, 0.14);
-  /* Dragging a band must never be interpreted as panning the stage. */
+  inset: 0;
+  pointer-events: none;
+}
+
+.quad-shape {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+}
+.quad-shape polygon {
+  fill: rgba(79, 140, 255, 0.16);
+  stroke: var(--accent);
+  stroke-width: 2;
+  pointer-events: auto;
   touch-action: none;
+  cursor: move;
 }
-.strip.employee {
-  border-color: var(--ok);
-  background: rgba(53, 199, 122, 0.14);
+.quad.employee .quad-shape polygon {
+  fill: rgba(53, 199, 122, 0.16);
+  stroke: var(--ok);
 }
-.strip .tag {
+.quad.invalid .quad-shape polygon {
+  stroke: var(--danger);
+  fill: rgba(255, 107, 107, 0.18);
+  stroke-dasharray: 6 4;
+}
+
+.quad-tag {
   position: absolute;
-  top: -11px;
-  left: 4px;
+  transform: translate(2px, -18px);
   font-size: 0.65rem;
   font-weight: 700;
   background: var(--accent);
   color: var(--accent-ink);
   border-radius: 4px;
   padding: 1px 5px;
+  pointer-events: none;
+  white-space: nowrap;
 }
-.strip.employee .tag {
+.quad.employee .quad-tag {
   background: var(--ok);
   color: #06301b;
 }
-.strip .handle {
+.quad.invalid .quad-tag {
+  background: var(--danger);
+  color: #2b0000;
+}
+
+/* Centred on its corner, 48px of grabbable area, drawn as a small dot. */
+.quad-handle {
   position: absolute;
   width: var(--tap);
   height: var(--tap);
+  margin-left: calc(var(--tap) / -2);
+  margin-top: calc(var(--tap) / -2);
   display: grid;
   place-items: center;
-  touch-action: none;
   background: none;
   border: none;
   padding: 0;
   min-height: 0;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
 }
-.strip .handle::after {
+.quad-handle::after {
   content: '';
   width: 20px;
   height: 20px;
   border-radius: 50%;
   background: var(--accent);
   border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
 }
-.strip.employee .handle::after {
+.quad.employee .quad-handle::after {
   background: var(--ok);
 }
-.strip .handle.n {
-  top: calc(var(--tap) / -2);
-  left: calc(50% - var(--tap) / 2);
-  cursor: ns-resize;
-}
-.strip .handle.s {
-  bottom: calc(var(--tap) / -2);
-  left: calc(50% - var(--tap) / 2);
-  cursor: ns-resize;
-}
-.strip .handle.w {
-  left: 0;
-  top: calc(50% - var(--tap) / 2);
-  cursor: ns-resize;
-}
-.strip .handle.e {
-  right: 0;
-  top: calc(50% - var(--tap) / 2);
-  cursor: ns-resize;
+.quad.invalid .quad-handle::after {
+  background: var(--danger);
 }
 
 /* ---------- matrix ---------- */
