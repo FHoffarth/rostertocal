@@ -252,6 +252,7 @@ label.field > span {
 .quad-tag {
   position: absolute;
   transform: translate(2px, -18px);
+  z-index: 1;
   font-size: 0.65rem;
   font-weight: 700;
   background: var(--accent);
@@ -260,6 +261,11 @@ label.field > span {
   padding: 1px 5px;
   pointer-events: none;
   white-space: nowrap;
+}
+/* Thin selection: lift the label clear of the corner handle (24px
+   radius) and of the row itself, so neither hides the day numbers. */
+.quad-tag.clear {
+  transform: translate(28px, -34px);
 }
 .quad.employee .quad-tag {
   background: var(--ok);
@@ -450,6 +456,22 @@ label.field > span {
   border-color: var(--danger);
   background: rgba(255, 107, 107, 0.1);
 }
+.install-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.install-hint span {
+  flex: 1;
+  min-width: 0;
+}
+.install-hint button {
+  min-height: 40px;
+  padding: 0 12px;
+  font-size: 0.85rem;
+}
+
 .banner.ok {
   border-color: var(--ok);
   background: rgba(53, 199, 122, 0.1);

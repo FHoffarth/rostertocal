@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="RosterToCal">
+  <rect width="512" height="512" rx="112" fill="#0f1115"/>
+  <rect x="72" y="112" width="368" height="288" rx="28" fill="#181c24" stroke="#2e3646" stroke-width="10"/>
+  <path d="M72 176h368" stroke="#2e3646" stroke-width="10"/>
+  <circle cx="150" cy="144" r="12" fill="#9aa5b8"/>
+  <circle cx="362" cy="144" r="12" fill="#9aa5b8"/>
+  <g fill="#9aa5b8">
+    <rect x="112" y="216" width="44" height="26" rx="8"/>
+    <rect x="176" y="216" width="44" height="26" rx="8"/>
+    <rect x="304" y="216" width="44" height="26" rx="8"/>
+    <rect x="368" y="216" width="44" height="26" rx="8"/>
+    <rect x="112" y="286" width="44" height="26" rx="8"/>
+    <rect x="368" y="286" width="44" height="26" rx="8"/>
+  </g>
+  <rect x="240" y="216" width="44" height="26" rx="8" fill="#4f8cff"/>
+  <path d="M180 300l40 40 84-92" fill="none" stroke="#35c77a" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -4,6 +4,7 @@ import { AlignmentEditor } from './components/AlignmentEditor';
 import { ShiftMatrixEditor } from './components/ShiftMatrixEditor';
 import { ShiftBottomSheet } from './components/ShiftBottomSheet';
 import { ExportStep } from './components/ExportStep';
+import { InstallHint } from './components/InstallHint';
 import type { RosterPage } from './models/roster';
 import { quadFromBand, type QuadSelection } from './models/quad';
 import {
@@ -249,6 +250,7 @@ export default function App() {
         <span aria-hidden="true">🔒</span>
         <span>Your roster stays on this device. No upload, no account.</span>
       </div>
+      <InstallHint />
       <div className="steps" aria-hidden="true">
         {STEPS.map((s, i) => (
           <span key={s} className={i < stepIndex ? 'done' : i === stepIndex ? 'current' : ''} />

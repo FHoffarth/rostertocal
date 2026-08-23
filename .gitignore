@@ -28,3 +28,6 @@ validation/certs/
 
 # python bytecode from the fixture generator
 samples/__pycache__/
+
+# vercel
+.vercel
