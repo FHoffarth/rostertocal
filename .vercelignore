@@ -1,0 +1,16 @@
+# Never upload these to the deployment provider.
+
+# Local HTTPS validation certificates - PRIVATE KEYS.
+validation/certs/
+
+# Test fixtures and validation tooling: not part of the app, and the
+# roster fixtures have no business on a deployment host.
+validation/
+samples/
+src/tests/
+
+# Local build output; Vercel builds from source.
+dist/
+
+.git/
+node_modules/
