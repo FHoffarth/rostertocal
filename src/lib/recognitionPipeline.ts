@@ -6,13 +6,8 @@ import {
   type CellEvidence,
   type DayShift,
 } from '../models/shifts';
-import {
-  buildDayColumns,
-  cellRects,
-  groupTokens,
-  mapTokensToDays,
-  type DayAnchor,
-} from './gridAlignment';
+import { cellRects, columnsFromCandidates, mapTokensToDays } from './gridAlignment';
+import { buildAnchorCandidates, type RejectedCandidate } from './dateAnchors';
 import { daysInMonth } from './icsGenerator';
 import type { PdfTextPage } from './pdfExtractor';
 import type * as OcrModule from './ocrWorker';
@@ -83,10 +78,27 @@ export interface PipelineMetrics {
   totalMs: number;
 }
 
+/**
+ * Developer-only evidence about the date row. Kept out of the UI: it
+ * exists so a failure can be diagnosed from a device without guessing.
+ */
+export interface AnchorDiagnostics {
+  stripPx: string;
+  tokenCount: number;
+  /** Every digit the recogniser proposed, with its normalised position. */
+  tokens: { text: string; xNorm: number; x0: number; x1: number; confidence: number }[];
+  candidates: number;
+  acceptedDays: number[];
+  rejected: { day: number; xNorm: number; reason: string }[];
+  detail?: string;
+}
+
 export interface PipelineResult {
   ok: boolean;
   days: DayShift[];
   warnings: string[];
+  /** Developer-only. Never rendered verbatim to the user. */
+  anchorDiagnostics?: AnchorDiagnostics;
   /** Why recognition could not proceed. Present only when ok is false. */
   failure?: string;
   interpolatedDays: number[];
@@ -150,6 +162,29 @@ function stripLabel(s: RectifiedStrip | null): string {
   return s ? `${s.width}x${s.height}` : 'pdf-text';
 }
 
+/**
+ * The PDF text layer hands over whole strings, already correct, so there
+ * is nothing to reassemble - just read each one as a day.
+ */
+function pdfDayCandidates(tokens: OcrToken[], expectedDays: number) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const day = parseDayToken(t.text);
+    if (day === null || day > expectedDays) continue;
+    out.push({
+      day,
+      xNorm: (t.x0 + t.x1) / 2,
+      x0: t.x0,
+      x1: t.x1,
+      confidence: t.confidence,
+      tokens: [i],
+      origin: 'single' as const,
+    });
+  }
+  return out;
+}
+
 /** A row selection, flattened and ready for OCR. */
 interface RectifiedStrip {
   canvas: HTMLCanvasElement;
@@ -183,6 +218,10 @@ async function ocrStrip(strip: RectifiedStrip, charset: string): Promise<OcrToke
     ...t,
     x0: t.x0 / strip.width,
     x1: t.x1 / strip.width,
+    // y is normalised by the strip's own height, so "same line" stays a
+    // meaningful test whatever the rectified size turned out to be.
+    y0: t.y0 === undefined ? undefined : t.y0 / strip.height,
+    y1: t.y1 === undefined ? undefined : t.y1 / strip.height,
   }));
 }
 
@@ -286,28 +325,45 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
     : await ocrStrip(dateStripImg!, (await ocr()).DATE_CHARSET);
   const dateOcrMs = performance.now() - tDate;
 
-  // Character-level OCR splits "12" into "1" and "2"; put numbers back
-  // together before anything is read as a day.
-  const dateGroups = usingText ? dateTokens : groupTokens(dateTokens);
-
-  const anchors: DayAnchor[] = [];
-  for (const t of dateGroups) {
-    const day = parseDayToken(t.text);
-    if (day === null) continue;
-    anchors.push({ day, center: (t.x0 + t.x1) / 2 });
-  }
+  // Every reading the digits could support, without choosing between
+  // them yet: "2","4" offers day 2 + day 4 *and* day 24. Which survives
+  // is settled by whichever agrees with the rest of the row.
+  const candidates = usingText
+    ? pdfDayCandidates(dateTokens, expected)
+    : buildAnchorCandidates(dateTokens, expected);
 
   // Columns live in normalised row coordinates: 0 is the start of the
   // selected row, 1 is the end. That is the one coordinate system both
   // selections share.
-  const alignment = buildDayColumns(anchors, expected, 1);
+  const alignment = columnsFromCandidates(candidates, expected, 1);
   warnings.push(...alignment.warnings);
+
+  const anchorDiagnostics: AnchorDiagnostics = {
+    stripPx: stripLabel(dateStripImg),
+    tokenCount: dateTokens.length,
+    tokens: dateTokens.map((t) => ({
+      text: t.text,
+      xNorm: +((t.x0 + t.x1) / 2).toFixed(4),
+      x0: +t.x0.toFixed(4),
+      x1: +t.x1.toFixed(4),
+      confidence: +t.confidence.toFixed(3),
+    })),
+    candidates: candidates.length,
+    acceptedDays: (alignment.accepted ?? []).map((c) => c.day),
+    rejected: (alignment.rejected ?? []).map((r: RejectedCandidate) => ({
+      day: r.day,
+      xNorm: +r.xNorm.toFixed(4),
+      reason: r.reason,
+    })),
+    detail: alignment.diagnostic,
+  };
 
   if (!alignment.ok) {
     return {
       ok: false,
       days: [],
       warnings,
+      anchorDiagnostics,
       failure: alignment.failure,
       interpolatedDays: [],
       unmappedTokens: 0,
@@ -468,6 +524,7 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
     ok: true,
     days,
     warnings,
+    anchorDiagnostics,
     interpolatedDays: alignment.interpolatedDays,
     unmappedTokens: mapped.unmapped.length,
     source,

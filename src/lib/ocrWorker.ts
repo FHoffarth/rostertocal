@@ -190,6 +190,8 @@ export async function recognizeStrip(
     confidence: Math.max(0, Math.min(1, (t.confidence ?? 0) / 100)),
     x0: t.bbox?.x0 ?? 0,
     x1: t.bbox?.x1 ?? 0,
+    y0: t.bbox?.y0 ?? 0,
+    y1: t.bbox?.y1 ?? 0,
   }));
 }
 

@@ -52,14 +52,18 @@ describe('buildDayColumns - uneven spacing', () => {
     anchors[5].center += 30; // day 6, most of a full column off
     const r = buildDayColumns(anchors, 10, 2000);
     expect(r.ok).toBe(true);
-    expect(r.warnings.join(' ')).toMatch(/Ignored 1 misplaced day number\(s\): 6/);
+    // The rejection is developer evidence, not a user-facing warning.
+    expect(r.rejected?.some((x) => x.day === 6)).toBe(true);
+    expect(r.warnings.join(' ')).not.toMatch(/misread/);
     expect(r.interpolatedDays).toEqual([6]);
     const col6 = r.columns.find((c) => c.day === 6)!;
     // the interpolated column sits on the grid, not on the bad reading
     expect((col6.x0 + col6.x1) / 2).toBeCloseTo(50 + 40 * 6, 6);
   });
 
-  it('fails closed when the outliers are the majority', () => {
+  it('fails closed when a rival sequence explains as much as the winner', () => {
+    // Half the anchors sit on one line, half on another parallel to it.
+    // Either reading is as defensible as the other, so neither may win.
     const anchors = evenAnchors([1, 2, 3, 4, 5, 6, 7, 8]);
     anchors.forEach((a, i) => {
       if (i % 2 === 0) a.center += 30;
@@ -67,7 +71,8 @@ describe('buildDayColumns - uneven spacing', () => {
     const r = buildDayColumns(anchors, 8, 2000);
     expect(r.ok).toBe(false);
     expect(r.columns).toEqual([]);
-    expect(r.warnings.join(' ')).toMatch(/off the column grid/);
+    expect(r.failure).toMatch(/could not reliably read the date row/i);
+    expect(r.diagnostic).toMatch(/ambiguous/);
   });
 });
 
@@ -82,10 +87,11 @@ describe('buildDayColumns - missing tokens', () => {
     expect(r.warnings.join(' ')).toMatch(/interpolated/);
   });
 
-  it('refuses to guess a grid from fewer than three anchors', () => {
+  it('refuses to guess a grid from too few anchors', () => {
     const r = buildDayColumns(evenAnchors([1, 2]), 31, 2000);
     expect(r.ok).toBe(false);
-    expect(r.warnings.join(' ')).toMatch(/at least 3/);
+    expect(r.failure).toMatch(/could not reliably read the date row/i);
+    expect(r.diagnostic).toMatch(/usable day candidate/);
   });
 
   it('ignores day numbers outside 1..31', () => {
@@ -97,28 +103,45 @@ describe('buildDayColumns - missing tokens', () => {
 });
 
 describe('buildDayColumns - anchor mismatch', () => {
-  it('fails closed when day numbers do not increase left to right', () => {
+  it('rejects an out-of-order anchor instead of killing the grid', () => {
+    // day 3 sits to the right of day 5. The old code aborted the whole
+    // alignment on this; it is one bad reading among good ones.
     const anchors: DayAnchor[] = [
       { day: 1, center: 90 },
-      { day: 5, center: 130 },
       { day: 3, center: 170 },
-      { day: 7, center: 210 },
+      { day: 5, center: 250 },
+      { day: 7, center: 330 },
+      { day: 9, center: 410 },
+      { day: 2, center: 420 },
     ];
-    const r = buildDayColumns(anchors, 7, 2000);
-    expect(r.ok).toBe(false);
-    expect(r.columns).toEqual([]);
-    expect(r.warnings.join(' ')).toMatch(/mismatch/);
+    const r = buildDayColumns(anchors, 10, 2000);
+    expect(r.ok).toBe(true);
+    expect(r.rejected?.some((x) => x.day === 2)).toBe(true);
+    expect(r.warnings.join(' ')).not.toMatch(/misread/);
   });
 
-  it('discards both readings of a contradicted day and interpolates it', () => {
+  it('still fails closed when nothing consistent remains', () => {
+    const anchors: DayAnchor[] = [
+      { day: 9, center: 90 },
+      { day: 4, center: 200 },
+      { day: 1, center: 310 },
+    ];
+    const r = buildDayColumns(anchors, 10, 2000);
+    expect(r.ok).toBe(false);
+    expect(r.columns).toEqual([]);
+  });
+
+  it('keeps the reading of a duplicated day that fits the sequence', () => {
+    // Day 3 is read twice: once on the grid, once 5px off it. Dropping
+    // both threw away good evidence; the fit now keeps the one that
+    // agrees with the other days.
     const anchors = [...evenAnchors([1, 2, 3, 4, 5, 6]), { day: 3, center: 175 }];
     const r = buildDayColumns(anchors, 6, 2000);
     expect(r.ok).toBe(true);
-    expect(r.warnings.join(' ')).toMatch(/Day 3 was read in 2 places/);
-    expect(r.interpolatedDays).toEqual([3]);
     expect(r.columns.filter((c) => c.day === 3)).toHaveLength(1);
     const col3 = r.columns.find((c) => c.day === 3)!;
     expect((col3.x0 + col3.x1) / 2).toBeCloseTo(50 + 40 * 3, 6);
+    expect(r.rejected?.some((x) => x.day === 3)).toBe(true);
   });
 });
 

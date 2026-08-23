@@ -1,4 +1,9 @@
 import type { CropRect, DayColumn, OcrToken } from '../models/roster';
+import {
+  fitAnchorSequence,
+  type AnchorCandidate,
+  type RejectedCandidate,
+} from './dateAnchors';
 
 /**
  * Geometry owns the date -> cell association.
@@ -20,37 +25,30 @@ export interface AlignmentResult {
   /** Days that had no direct anchor and were interpolated. */
   interpolatedDays: number[];
   warnings: string[];
-  /** Why alignment failed. Present only when ok is false. */
+  /** What the user is told. Present only when ok is false. */
   failure?: string;
+  /** Developer-only detail behind the failure. Never shown as-is. */
+  diagnostic?: string;
+  /** Readings that survived the fit. */
+  accepted?: AnchorCandidate[];
+  /** Readings that lost, and why. Developer-only. */
+  rejected?: RejectedCandidate[];
 }
 
 /** Max tolerated residual of an anchor from the fitted line, in pitches. */
 export const FIT_TOLERANCE = 0.35;
 
-export const NO_FIT = 'Could not fit a column pitch to the anchors';
-export const NOT_ENOUGH_ANCHORS = 'Not enough day anchors recognised (need at least 3)';
+/**
+ * The one message the user sees when the date row cannot be read.
+ *
+ * It says what to do, not what went wrong internally. "day 1 sits right
+ * of day 24" is true and completely useless to someone holding a phone,
+ * and it implies they mis-selected when the real cause was usually a
+ * fragmented glyph.
+ */
+export const UNREADABLE_DATE_ROW =
+  'We could not reliably read the date row. Adjust the blue Dates box so it covers only the day numbers, then try again.';
 
-function mean(xs: number[]): number {
-  return xs.reduce((a, b) => a + b, 0) / xs.length;
-}
-
-/** Least-squares fit of centre = slope * day + intercept. */
-function fitLine(anchors: DayAnchor[]): { slope: number; intercept: number } | null {
-  const n = anchors.length;
-  if (n < 2) return null;
-  const mx = mean(anchors.map((a) => a.day));
-  const my = mean(anchors.map((a) => a.center));
-  let num = 0;
-  let den = 0;
-  for (const a of anchors) {
-    num += (a.day - mx) * (a.center - my);
-    den += (a.day - mx) * (a.day - mx);
-  }
-  if (den === 0) return null;
-  const slope = num / den;
-  if (!Number.isFinite(slope) || slope <= 0) return null;
-  return { slope, intercept: my - slope * mx };
-}
 
 /**
  * Build day columns from date-strip anchors.
@@ -64,98 +62,58 @@ export function buildDayColumns(
   expectedDays: number,
   stripWidth: number,
 ): AlignmentResult {
+  // Each anchor is one candidate reading, consuming its own token, so
+  // the shared fitter can reject the contradictory ones instead of the
+  // whole grid dying on the first out-of-order pair.
+  const candidates: AnchorCandidate[] = anchors.map((a, i) => ({
+    day: a.day,
+    xNorm: a.center,
+    x0: a.center,
+    x1: a.center,
+    confidence: 1,
+    tokens: [i],
+    origin: 'single' as const,
+  }));
+  return columnsFromCandidates(candidates, expectedDays, stripWidth);
+}
+
+/**
+ * Turn candidate readings into the 31 day columns.
+ *
+ * The target is 31 columns, not 31 perfect labels: a handful of
+ * well-placed days constrains the whole grid, and the rest are
+ * interpolated from the fitted line. When the fit is underconstrained or
+ * self-contradictory it fails closed - a plausible-looking grid built
+ * from garbage is the one outcome worse than no grid.
+ */
+export function columnsFromCandidates(
+  candidates: AnchorCandidate[],
+  expectedDays: number,
+  stripWidth: number,
+): AlignmentResult {
   const warnings: string[] = [];
+  const fit = fitAnchorSequence(candidates, expectedDays, stripWidth);
 
-  const valid = anchors
-    .filter((a) => Number.isInteger(a.day) && a.day >= 1 && a.day <= 31)
-    .filter((a) => Number.isFinite(a.center))
-    .sort((a, b) => a.center - b.center);
-
-  // The same day read in two places is a contradiction, and there is no
-  // honest way to pick a winner. Drop every reading of that day and let
-  // the column be interpolated from the ones that agree.
-  const counts = new Map<number, number>();
-  for (const a of valid) counts.set(a.day, (counts.get(a.day) ?? 0) + 1);
-  const uniq: DayAnchor[] = [];
-  for (const a of valid) {
-    if ((counts.get(a.day) ?? 0) > 1) continue;
-    uniq.push(a);
-  }
-  for (const [day, n] of counts) {
-    if (n > 1) warnings.push(`Day ${day} was read in ${n} places and was ignored`);
-  }
-
-  if (uniq.length < 3) {
+  if (!fit.ok || !fit.model) {
     return {
       ok: false,
       columns: [],
       interpolatedDays: [],
-      warnings: [...warnings, NOT_ENOUGH_ANCHORS],
-      failure: NOT_ENOUGH_ANCHORS,
+      warnings: [...warnings, UNREADABLE_DATE_ROW],
+      failure: UNREADABLE_DATE_ROW,
+      diagnostic: fit.diagnostic,
+      rejected: fit.rejected,
+      accepted: [],
     };
   }
 
-  // Days must increase left to right. Anything else is an anchor mismatch.
-  for (let i = 1; i < uniq.length; i++) {
-    if (uniq[i].day <= uniq[i - 1].day) {
-      const mismatch = `Date anchor mismatch: day ${uniq[i].day} sits right of day ${uniq[i - 1].day}`;
-      return {
-        ok: false,
-        columns: [],
-        interpolatedDays: [],
-        warnings: [...warnings, mismatch],
-        failure: mismatch,
-      };
-    }
-  }
+  const { model, accepted } = fit;
+  // Rejected candidates are NOT surfaced to the user. Most of them are
+  // the losing half of a two-digit reading - the "1" of a 12, the "2" of
+  // a 24 - which is the parser working correctly, not a problem anyone
+  // needs to see. The full list stays in the diagnostics.
 
-  // Fit the column pitch, discarding the odd misread day number: one
-  // bad anchor out of thirty must not sink an otherwise good grid. What
-  // is rejected outright is a layout where the outliers are the norm.
-  const minKeep = Math.max(3, Math.ceil(uniq.length * 0.6));
-  let kept = uniq;
-  let fit = fitLine(kept);
-  const dropped: number[] = [];
-
-  while (fit) {
-    let worst: { anchor: DayAnchor; residual: number } | null = null;
-    for (const a of kept) {
-      const residual = Math.abs(a.center - (fit.slope * a.day + fit.intercept));
-      if (!worst || residual > worst.residual) worst = { anchor: a, residual };
-    }
-    if (!worst || worst.residual <= FIT_TOLERANCE * fit.slope) break;
-    if (kept.length - 1 < minKeep) {
-      const offGrid = `Day ${worst.anchor.day} is off the column grid - re-align the date strip`;
-      return {
-        ok: false,
-        columns: [],
-        interpolatedDays: [],
-        warnings: [...warnings, offGrid],
-        failure: offGrid,
-      };
-    }
-    dropped.push(worst.anchor.day);
-    kept = kept.filter((a) => a !== worst!.anchor);
-    fit = fitLine(kept);
-  }
-
-  if (!fit) {
-    return {
-      ok: false,
-      columns: [],
-      interpolatedDays: [],
-      warnings: [...warnings, NO_FIT],
-      failure: NO_FIT,
-    };
-  }
-
-  if (dropped.length > 0) {
-    warnings.push(
-      `Ignored ${dropped.length} misplaced day number(s): ${dropped.sort((a, b) => a - b).join(', ')}`,
-    );
-  }
-
-  const anchorByDay = new Map(kept.map((a) => [a.day, a.center]));
+  const anchorByDay = new Map(accepted.map((c) => [c.day, c.xNorm]));
   const interpolatedDays: number[] = [];
   const centers: { day: number; center: number }[] = [];
   for (let day = 1; day <= expectedDays; day++) {
@@ -164,11 +122,11 @@ export function buildDayColumns(
       centers.push({ day, center: direct });
     } else {
       interpolatedDays.push(day);
-      centers.push({ day, center: fit.slope * day + fit.intercept });
+      centers.push({ day, center: model.slope * day + model.intercept });
     }
   }
 
-  const half = fit.slope / 2;
+  const half = model.slope / 2;
   const columns: DayColumn[] = centers.map((c, i) => {
     const prev = centers[i - 1];
     const next = centers[i + 1];
@@ -187,7 +145,15 @@ export function buildDayColumns(
     );
   }
 
-  return { ok: true, columns, interpolatedDays, warnings };
+  return {
+    ok: true,
+    columns,
+    interpolatedDays,
+    warnings,
+    accepted,
+    rejected: fit.rejected,
+    diagnostic: fit.diagnostic,
+  };
 }
 
 /**

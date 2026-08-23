@@ -103,6 +103,21 @@ export function QuadCropper({
   const pts = quadPoints(quad);
   const polygon = pts.map((p) => `${p.x * scale},${p.y * scale}`).join(' ');
 
+  /**
+   * A date row is a few pixels tall on screen while a corner handle is
+   * 48px, so the label would otherwise sit right on top of the day
+   * numbers the user is trying to line up with. When the selection is
+   * thinner than a touch target the label moves clear above it.
+   *
+   * Presentation only - the canonical quad is untouched.
+   */
+  const displayedHeight =
+    Math.min(
+      Math.hypot(quad.bottomLeft.x - quad.topLeft.x, quad.bottomLeft.y - quad.topLeft.y),
+      Math.hypot(quad.bottomRight.x - quad.topRight.x, quad.bottomRight.y - quad.topRight.y),
+    ) * scale;
+  const thin = displayedHeight < 48;
+
   return (
     <div
       className={`quad ${variant === 'employee' ? 'employee' : ''} ${
@@ -126,7 +141,7 @@ export function QuadCropper({
       </svg>
 
       <span
-        className="quad-tag"
+        className={`quad-tag ${thin ? 'clear' : ''}`}
         style={{ left: quad.topLeft.x * scale, top: quad.topLeft.y * scale }}
       >
         {label}

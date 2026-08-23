@@ -21,10 +21,18 @@ export interface CropRect {
 export interface OcrToken {
   text: string;
   confidence: number;
-  /** Left edge, source-image px. */
+  /** Left edge, in whatever space the caller is working in. */
   x0: number;
-  /** Right edge, source-image px. */
+  /** Right edge. */
   x1: number;
+  /**
+   * Vertical extent, when the recogniser reported one. Two digits only
+   * belong to the same number if they sit on the same line, so the date
+   * parser needs this to tell "24" from a heading digit that happens to
+   * be above the row.
+   */
+  y0?: number;
+  y1?: number;
 }
 
 /** A day column: geometry owns which x-range belongs to which day. */
