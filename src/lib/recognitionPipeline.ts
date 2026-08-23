@@ -1,5 +1,10 @@
 import { skewAt, type CropRect, type OcrToken, type RosterPage } from '../models/roster';
-import { RecognitionSource, type DayShift } from '../models/shifts';
+import {
+  CellState,
+  RecognitionSource,
+  type CellEvidence,
+  type DayShift,
+} from '../models/shifts';
 import {
   buildDayColumns,
   cellRects,
@@ -29,8 +34,12 @@ import { releaseCanvas } from './imageLoader';
  */
 export const OCR_UPSCALE = 3;
 
-/** Cells at or below this get a second, per-cell OCR pass. */
-export const RETRY_CONFIDENCE = 0.8;
+/**
+ * Every cell gets an independent second reading. Measured at ~30 ms per
+ * cell on the sample photo (under 1 s for a whole month) against the
+ * single shared worker - a cheap price for never exporting a reading
+ * that only one pass ever saw.
+ */
 
 /**
  * tesseract.js is ~200 kB of JS before it even fetches its WASM core.
@@ -57,8 +66,11 @@ export interface PipelineInput {
 export interface PipelineMetrics {
   dateOcrMs: number;
   rowOcrMs: number;
-  retryOcrMs: number;
-  retriedCells: number;
+  /** Time spent on the independent cell-local verification pass. */
+  cellOcrMs: number;
+  verifiedCells: number;
+  /** Cells where the two passes did not agree on a code. */
+  disagreements: number;
   totalMs: number;
 }
 
@@ -76,6 +88,12 @@ export interface PipelineResult {
 
 function ymd(month: string, day: number): string {
   return `${month}-${String(day).padStart(2, '0')}`;
+}
+
+/** Readable description of one pass's result, for the disagreement note. */
+function describe(code: string | null, cleaned: string): string {
+  if (code) return `"${code}"`;
+  return cleaned ? `"${cleaned}" (not a known code)` : 'nothing';
 }
 
 function monthLength(month: string): number {
@@ -119,6 +137,79 @@ async function ocrBand(source: HTMLCanvasElement, strip: CropRect, charset: stri
   } finally {
     releaseCanvas(crop);
   }
+}
+
+export interface PassReading {
+  text: string;
+  confidence: number;
+}
+
+export interface CellVerdict {
+  shiftCode: string | null;
+  confidence: number;
+  state: CellState;
+  evidence: CellEvidence;
+}
+
+/**
+ * Decide what a cell is worth, from two independent readings.
+ *
+ * The one rule that matters: disagreement is never settled by picking
+ * the more confident reading. The failure this exists to prevent had the
+ * *wrong* answer at 99 % and the right one at 57 %, because a glyph that
+ * merged with a printed rule was silently dropped from the row pass,
+ * leaving a clean single character behind. Confidence describes a glyph,
+ * never the contents of a day.
+ *
+ * A reading that only matched after repair is a guess as well, so it is
+ * offered as a suggestion but never counts as recognised.
+ */
+export function adjudicateCell(
+  row: PassReading,
+  cell: PassReading,
+  knownCodes: string[],
+): CellVerdict {
+  const rowNorm = normalizeShiftToken(row.text, knownCodes, row.confidence);
+  const cellNorm = normalizeShiftToken(cell.text, knownCodes, cell.confidence);
+
+  const agreed = rowNorm.code !== null && rowNorm.code === cellNorm.code;
+  const repaired = rowNorm.repaired || cellNorm.repaired;
+
+  let state: CellState;
+  let reason: string | undefined;
+  if (rowNorm.code === null && cellNorm.code === null) {
+    state = CellState.UNRESOLVED;
+    reason = 'Neither pass could read this cell';
+  } else if (!agreed) {
+    state = CellState.UNRESOLVED;
+    reason = `Row pass read ${describe(rowNorm.code, rowNorm.cleaned)}, cell pass read ${describe(cellNorm.code, cellNorm.cleaned)}`;
+  } else if (repaired) {
+    state = CellState.UNRESOLVED;
+    reason = 'The reading only matched a known code after repair';
+  } else {
+    state = CellState.RECOGNIZED;
+  }
+
+  const evidence: CellEvidence = {
+    rowCode: rowNorm.code,
+    cellCode: cellNorm.code,
+    rowText: rowNorm.cleaned,
+    cellText: cellNorm.cleaned,
+    agreed,
+    repaired,
+    reason,
+  };
+
+  return {
+    // An unresolved cell carries no value forward - the user picks.
+    shiftCode: state === CellState.RECOGNIZED ? rowNorm.code : null,
+    confidence:
+      state === CellState.RECOGNIZED
+        ? Math.min(rowNorm.confidence, cellNorm.confidence)
+        : 0,
+    state,
+    evidence,
+  };
 }
 
 /**
@@ -166,8 +257,9 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
       metrics: {
         dateOcrMs,
         rowOcrMs: 0,
-        retryOcrMs: 0,
-        retriedCells: 0,
+        cellOcrMs: 0,
+        verifiedCells: 0,
+        disagreements: 0,
         totalMs: performance.now() - t0,
       },
     };
@@ -183,64 +275,120 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
   const mapped = mapTokensToDays(alignment.columns, rowTokens);
   const cells = new Map(mapped.cells.map((c) => [c.day, c]));
 
-  // --- targeted second pass on weak cells ----------------------------
-  // A whole-strip pass is far cheaper than 31 crops, so we only re-OCR
-  // the cells that came back empty or unconvincing.
-  let retryOcrMs = 0;
-  let retriedCells = 0;
+  // --- independent cell-local verification ---------------------------
+  //
+  // The row pass reads one wide strip, so a glyph pressed against a
+  // printed rule can be lost without anything downstream noticing: the
+  // cell then holds whatever survived, at that glyph's own high
+  // confidence. A second reading of the isolated cell is the only thing
+  // that catches it.
+  //
+  // The crop is exactly the day column - never wider - so a neighbour's
+  // glyph cannot be pulled in.
+  const rects = new Map(
+    cellRects(alignment.columns, employeeStrip).map((r, i) => [
+      alignment.columns[i].day,
+      r,
+    ]),
+  );
+
+  const cellReads = new Map<number, { text: string; confidence: number }>();
+  let cellOcrMs = 0;
+  let verifiedCells = 0;
+
   if (!usingText) {
-    const weak = mapped.cells.filter((c) => c.confidence <= RETRY_CONFIDENCE);
-    if (weak.length > 0) {
-      const tRetry = performance.now();
-      const rects = new Map(
-        cellRects(alignment.columns, employeeStrip).map((r, i) => [
-          alignment.columns[i].day,
-          r,
-        ]),
-      );
-      for (const cell of weak) {
-        const rect = rects.get(cell.day);
-        if (!rect) continue;
-        const engine = await ocr();
-        const crop = preprocessForOcr(cropToCanvas(page.canvas, rect, OCR_UPSCALE));
-        try {
-          const tokens = await engine.recognizeStrip(crop, {
-            charset: engine.SHIFT_CHARSET,
-            psm: engine.PSM_SINGLE_WORD,
-            granularity: 'word',
-          });
-          retriedCells += 1;
-          const best = tokens.sort((a, b) => b.confidence - a.confidence)[0];
-          if (best && best.confidence > cell.confidence) {
-            cells.set(cell.day, {
-              day: cell.day,
-              text: best.text,
-              confidence: best.confidence,
-              tokenCount: 1,
-            });
-          }
-        } finally {
-          releaseCanvas(crop);
-        }
+    const tCell = performance.now();
+    const engine = await ocr();
+    for (const column of alignment.columns) {
+      const rect = rects.get(column.day);
+      if (!rect) continue;
+      const crop = preprocessForOcr(cropToCanvas(page.canvas, rect, OCR_UPSCALE));
+      try {
+        const tokens = await engine.recognizeStrip(crop, {
+          charset: engine.SHIFT_CHARSET,
+          psm: engine.PSM_SINGLE_WORD,
+          granularity: 'word',
+        });
+        verifiedCells += 1;
+        const ordered = [...tokens].sort((a, b) => a.x0 - b.x0);
+        cellReads.set(column.day, {
+          text: ordered.map((t) => t.text).join(''),
+          confidence: ordered.length
+            ? Math.min(...ordered.map((t) => t.confidence))
+            : 0,
+        });
+      } finally {
+        releaseCanvas(crop);
       }
-      retryOcrMs = performance.now() - tRetry;
     }
+    cellOcrMs = performance.now() - tCell;
   }
 
-  // --- normalise ------------------------------------------------------
+  // --- adjudicate -----------------------------------------------------
   const source = usingText ? RecognitionSource.PDF_TEXT : RecognitionSource.OCR;
   const days: DayShift[] = [];
+  let disagreements = 0;
+
   for (let day = 1; day <= expected; day++) {
-    const cell = cells.get(day);
-    const norm = normalizeShiftToken(cell?.text ?? '', knownCodes, cell?.confidence ?? 0);
+    const rowCell = cells.get(day);
+
+    if (usingText) {
+      // A PDF text layer is exact, so there is no second opinion to seek
+      // and none is needed. It still has to be confirmed before export,
+      // and a token that only matched after repair is still a guess.
+      const norm = normalizeShiftToken(
+        rowCell?.text ?? '',
+        knownCodes,
+        rowCell?.confidence ?? 0,
+      );
+      const settled = norm.code !== null && !norm.repaired;
+      days.push({
+        dateStr: ymd(month, day),
+        shiftCode: settled ? norm.code : null,
+        confidence: settled ? norm.confidence : 0,
+        source,
+        state: settled ? CellState.RECOGNIZED : CellState.UNRESOLVED,
+        rawText: norm.cleaned,
+        evidence: {
+          rowCode: norm.code,
+          cellCode: norm.code,
+          rowText: norm.cleaned,
+          cellText: norm.cleaned,
+          agreed: true,
+          repaired: norm.repaired,
+          reason: settled
+            ? undefined
+            : norm.code
+              ? 'The reading only matched a known code after repair'
+              : 'Nothing readable in this cell',
+        },
+      });
+      continue;
+    }
+
+    const read = cellReads.get(day);
+    const verdict = adjudicateCell(
+      { text: rowCell?.text ?? '', confidence: rowCell?.confidence ?? 0 },
+      { text: read?.text ?? '', confidence: read?.confidence ?? 0 },
+      knownCodes,
+    );
+    if (verdict.evidence.rowCode !== verdict.evidence.cellCode) disagreements += 1;
+
     days.push({
       dateStr: ymd(month, day),
-      shiftCode: norm.code,
-      confidence: norm.code ? norm.confidence : 0,
+      shiftCode: verdict.shiftCode,
+      confidence: verdict.confidence,
       source,
-      confirmed: false,
-      rawText: norm.cleaned,
+      state: verdict.state,
+      rawText: verdict.evidence.rowText || verdict.evidence.cellText,
+      evidence: verdict.evidence,
     });
+  }
+
+  if (disagreements > 0) {
+    warnings.push(
+      `${disagreements} cell(s) were read differently by the two passes and need your decision`,
+    );
   }
 
   if (mapped.unmapped.length > 0) {
@@ -259,8 +407,9 @@ export async function runRecognition(input: PipelineInput): Promise<PipelineResu
     metrics: {
       dateOcrMs,
       rowOcrMs,
-      retryOcrMs,
-      retriedCells,
+      cellOcrMs,
+      verifiedCells,
+      disagreements,
       totalMs: performance.now() - t0,
     },
   };

@@ -1,12 +1,15 @@
 import { useState } from 'react';
-import type { ShiftDef } from '../models/shifts';
+import type { CellEvidence, ShiftDef } from '../models/shifts';
 
 interface Props {
   dateStr: string;
   currentCode: string | null;
   rawText?: string;
+  /** What each recognition pass saw, so the user can judge for themselves. */
+  evidence?: CellEvidence;
   defs: ShiftDef[];
   onPick: (code: string) => void;
+  onConfirm?: () => void;
   onClear: () => void;
   onCreate: (def: ShiftDef) => void;
   onClose: () => void;
@@ -23,8 +26,10 @@ export function ShiftBottomSheet({
   dateStr,
   currentCode,
   rawText,
+  evidence,
   defs,
   onPick,
+  onConfirm,
   onClear,
   onCreate,
   onClose,
@@ -66,7 +71,17 @@ export function ShiftBottomSheet({
             Close
           </button>
         </div>
-        {rawText ? (
+        {evidence && !evidence.agreed ? (
+          <div className="banner err" style={{ marginTop: 8 }}>
+            The two passes disagreed, so nothing was assumed.
+            <div className="muted" style={{ marginTop: 4 }}>
+              Whole row read {evidence.rowText ? `“${evidence.rowText}”` : 'nothing'};
+              this cell alone read {evidence.cellText ? `“${evidence.cellText}”` : 'nothing'}.
+            </div>
+          </div>
+        ) : evidence?.reason ? (
+          <p className="muted">{evidence.reason}.</p>
+        ) : rawText ? (
           <p className="muted">
             Read as “{rawText}”{currentCode ? '' : ' — not a shift code I know.'}
           </p>
@@ -91,12 +106,21 @@ export function ShiftBottomSheet({
                 +<small>New code</small>
               </button>
             </div>
+            {currentCode && onConfirm && (
+              <button
+                className="primary"
+                style={{ marginTop: 10 }}
+                onClick={onConfirm}
+              >
+                Keep {currentCode}
+              </button>
+            )}
             <button
               className="ghost"
-              style={{ width: '100%', marginTop: 10 }}
+              style={{ width: '100%', marginTop: 8 }}
               onClick={onClear}
             >
-              Leave unresolved
+              Nothing on this day
             </button>
           </>
         )}

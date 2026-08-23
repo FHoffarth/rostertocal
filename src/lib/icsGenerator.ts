@@ -1,4 +1,4 @@
-import type { DayShift, ShiftDef } from '../models/shifts';
+import { isExportable, type DayShift, type ShiftDef } from '../models/shifts';
 
 export const TZID = 'Europe/Berlin';
 export const PRODID = '-//RosterToCal//MVP 0.1//EN';
@@ -233,7 +233,12 @@ export function buildVevent(
 
 /**
  * Generate a VCALENDAR from days.
- * Off-days, unknown codes and unresolved days produce no event.
+ *
+ * Only cells a human has confirmed or edited become events. This is
+ * enforced here, in the engine, and not only in the UI: an unconfirmed
+ * reading must not be able to reach a calendar through any code path,
+ * however high the recogniser rated it. Off-days and cells with no code
+ * produce no event either.
  */
 export function generateIcs(
   days: DayShift[],
@@ -255,6 +260,7 @@ export function generateIcs(
   if (opts.includeVtimezone !== false) lines.push(...VTIMEZONE_BERLIN);
 
   for (const day of days) {
+    if (!isExportable(day)) continue;
     if (!day.shiftCode) continue;
     const def = byCode.get(day.shiftCode.toUpperCase());
     if (!def || def.isOff) continue;

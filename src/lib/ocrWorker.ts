@@ -119,6 +119,12 @@ interface RawWord extends RawSymbol {
 /**
  * A glyph that spans the full height of the band is a printed rule, not
  * a character. Anything at or above this fraction is discarded.
+ *
+ * Note what this costs: when a real glyph *touches* a rule the two merge
+ * into one full-height blob and the character is dropped with it, which
+ * is how a cell reading "OFF" once came back as a lone, 99 %-confident
+ * "F". Nothing here can tell the two cases apart, which is exactly why
+ * the pipeline never trusts a single pass - see adjudicateCell.
  */
 export const RULE_HEIGHT_RATIO = 0.85;
 

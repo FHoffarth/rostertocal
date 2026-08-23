@@ -10,7 +10,12 @@ import {
   parseYmd,
   toIcsLocal,
 } from '../lib/icsGenerator';
-import { RecognitionSource, type DayShift, type ShiftDef } from '../models/shifts';
+import {
+  CellState,
+  RecognitionSource,
+  type DayShift,
+  type ShiftDef,
+} from '../models/shifts';
 
 const STAMP = '20260823T101500Z';
 
@@ -20,13 +25,18 @@ const DEFS: ShiftDef[] = [
   { code: 'OFF', label: 'Frei', start: '00:00', end: '00:00', isOff: true },
 ];
 
-function day(dateStr: string, shiftCode: string | null): DayShift {
+/** A day the user has settled - the only kind that may export. */
+function day(
+  dateStr: string,
+  shiftCode: string | null,
+  state: CellState = CellState.CONFIRMED,
+): DayShift {
   return {
     dateStr,
     shiftCode,
     confidence: 1,
     source: RecognitionSource.USER_CONFIRMED,
-    confirmed: true,
+    state,
   };
 }
 

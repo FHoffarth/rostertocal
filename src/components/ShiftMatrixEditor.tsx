@@ -1,4 +1,11 @@
-import { CONFIDENCE_THRESHOLD, isUncertain, type DayShift, type ShiftDef } from '../models/shifts';
+import {
+  CellState,
+  isBulkAcceptable,
+  isExportable,
+  needsAttention,
+  type DayShift,
+  type ShiftDef,
+} from '../models/shifts';
 import { parseYmd } from '../lib/icsGenerator';
 
 interface Props {
@@ -7,7 +14,7 @@ interface Props {
   warnings: string[];
   metricsLine?: string | null;
   onOpenDay: (dateStr: string) => void;
-  onConfirmAll: () => void;
+  onAcceptRecognized: () => void;
   onContinue: () => void;
   onBack: () => void;
 }
@@ -25,17 +32,34 @@ export function isOffCode(code: string | null, defs: ShiftDef[]): boolean {
   return defs.find((d) => d.code.toUpperCase() === code.toUpperCase())?.isOff ?? false;
 }
 
-/** Cells that must not be exported without the user looking at them. */
-export function unresolvedDays(days: DayShift[]): DayShift[] {
-  return days.filter((d) => isUncertain(d));
+/** Every cell a human has not yet settled. All of them block export. */
+export function openDays(days: DayShift[]): DayShift[] {
+  return days.filter(needsAttention);
 }
+
+/** Cells the machine could not settle - these need individual attention. */
+export function disputedDays(days: DayShift[]): DayShift[] {
+  return days.filter((d) => d.state === CellState.UNRESOLVED);
+}
+
+/** Cells a single bulk action may accept. */
+export function acceptableDays(days: DayShift[]): DayShift[] {
+  return days.filter(isBulkAcceptable);
+}
+
+const STATE_LABEL: Record<CellState, string> = {
+  [CellState.RECOGNIZED]: 'to check',
+  [CellState.UNRESOLVED]: 'unclear',
+  [CellState.CONFIRMED]: 'confirmed',
+  [CellState.EDITED]: 'edited',
+};
 
 /**
  * CONFIRM. The whole month at a glance, every cell one tap from correct.
  *
- * Confidence is displayed, never trusted: a cell below the threshold is
- * marked and counted, and the export step refuses to move until each
- * one has been touched.
+ * Nothing here is exportable until a human says so. A cell the two
+ * recognition passes disagreed on is marked "unclear" and cannot be
+ * swept up by the bulk accept - it has to be opened.
  */
 export function ShiftMatrixEditor({
   days,
@@ -43,19 +67,21 @@ export function ShiftMatrixEditor({
   warnings,
   metricsLine,
   onOpenDay,
-  onConfirmAll,
+  onAcceptRecognized,
   onContinue,
   onBack,
 }: Props) {
-  const open = unresolvedDays(days);
+  const open = openDays(days);
+  const disputed = disputedDays(days);
+  const acceptable = acceptableDays(days);
 
   return (
     <section>
       <div className="card">
         <h2>Check what was read</h2>
         <p className="muted">
-          Tap any day to change it. Orange means the recogniser was unsure, red
-          dashed means nothing usable was read.
+          Nothing goes in your calendar until you accept it. Red cells are ones the
+          two reading passes disagreed on — open those yourself.
         </p>
       </div>
 
@@ -67,11 +93,11 @@ export function ShiftMatrixEditor({
 
       {open.length > 0 ? (
         <div className="banner warn">
-          {open.length} day{open.length === 1 ? '' : 's'} need
-          {open.length === 1 ? 's' : ''} your confirmation.
+          {open.length} of {days.length} days still need you
+          {disputed.length > 0 ? ` — ${disputed.length} unclear` : ''}.
         </div>
       ) : (
-        <div className="banner ok">Nothing needs your attention. Check anything that looks wrong.</div>
+        <div className="banner ok">All {days.length} days settled. Ready to export.</div>
       )}
 
       <div className="matrix">
@@ -80,11 +106,9 @@ export function ShiftMatrixEditor({
           const off = isOffCode(d.shiftCode, defs);
           const cls = [
             'cell',
-            d.confirmed ? 'confirmed' : '',
-            !d.confirmed && d.shiftCode === null ? 'unknown' : '',
-            !d.confirmed && d.shiftCode !== null && d.confidence < CONFIDENCE_THRESHOLD
-              ? 'uncertain'
-              : '',
+            isExportable(d) ? 'confirmed' : '',
+            d.state === CellState.UNRESOLVED ? 'unknown' : '',
+            d.state === CellState.RECOGNIZED ? 'uncertain' : '',
             off ? 'off' : '',
             wd === 0 || wd === 6 ? 'weekend' : '',
           ]
@@ -95,7 +119,8 @@ export function ShiftMatrixEditor({
               key={d.dateStr}
               className={cls}
               onClick={() => onOpenDay(d.dateStr)}
-              aria-label={`${d.dateStr}, ${d.shiftCode ?? 'unresolved'}`}
+              aria-label={`${d.dateStr}, ${d.shiftCode ?? 'unresolved'}, ${STATE_LABEL[d.state]}`}
+              data-state={d.state}
             >
               <span className="date">
                 {WEEKDAYS[wd]} {Number(d.dateStr.slice(8))}
@@ -104,11 +129,11 @@ export function ShiftMatrixEditor({
                 {d.shiftCode ?? '—'}
               </span>
               <span className="state">
-                {d.confirmed
-                  ? '✓'
-                  : d.shiftCode === null
-                    ? 'unread'
-                    : `${Math.round(d.confidence * 100)}%`}
+                {d.state === CellState.EDITED
+                  ? 'edited'
+                  : d.state === CellState.CONFIRMED
+                    ? '✓'
+                    : STATE_LABEL[d.state]}
               </span>
             </button>
           );
@@ -118,15 +143,15 @@ export function ShiftMatrixEditor({
       <div className="legend">
         <span>
           <i style={{ background: 'var(--ok)' }} />
-          confirmed
+          settled by you
         </span>
         <span>
           <i style={{ background: 'var(--warn)' }} />
-          unsure (&lt; {Math.round(CONFIDENCE_THRESHOLD * 100)}%)
+          read, needs your OK
         </span>
         <span>
           <i style={{ background: 'var(--danger)' }} />
-          nothing read
+          unclear, open it
         </span>
       </div>
 
@@ -141,8 +166,12 @@ export function ShiftMatrixEditor({
           Continue to export
         </button>
         <div className="row" style={{ marginTop: 8 }}>
-          <button className="ghost grow" onClick={onConfirmAll} disabled={open.length === 0}>
-            Accept all {open.length} as read
+          <button
+            className="ghost grow"
+            onClick={onAcceptRecognized}
+            disabled={acceptable.length === 0}
+          >
+            Accept {acceptable.length} read {acceptable.length === 1 ? 'day' : 'days'}
           </button>
           <button className="ghost" onClick={onBack}>
             Re-align

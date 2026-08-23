@@ -33,8 +33,9 @@ npm run build
 3. **Recognize** — the date band builds the day columns; the shift band is read
    into those columns. Geometry decides which day a reading belongs to — never
    the recogniser.
-4. **Confirm** — the whole month as tappable cells. Anything under 80 %
-   confidence is marked, anything unreadable is blank. One tap corrects a day.
+4. **Confirm** — the whole month as tappable cells. Nothing is exportable until
+   you settle it; cells the two reading passes disagreed on are marked and have
+   to be opened individually.
 5. **Export** — a `.ics` file, handed to the system share sheet or saved.
 
 ## Design decisions worth knowing
@@ -51,9 +52,16 @@ snapped to the nearest day.
 A day read in two places is dropped entirely; a single outlier is discarded and
 its column interpolated; a majority of outliers rejects the whole alignment.
 
-**Confidence is displayed, never trusted.** Nothing reaches the calendar until
-it is confirmed or explicitly accepted in the review step. Unreadable cells stay
-unreadable — no code is ever invented.
+**Confidence is displayed, never trusted.** Trust is a state a human moves a
+cell into, never a number the engine reports. A cell is `RECOGNIZED`,
+`UNRESOLVED`, `CONFIRMED` or `EDITED`, and only the last two export — enforced
+in `icsGenerator`, not just in the UI. Unreadable cells stay unreadable; no code
+is ever invented.
+
+**Two independent readings per cell.** The row pass proposes; a second pass over
+the isolated day cell verifies. Disagreement is never settled by preferring the
+higher confidence — that is precisely what produced the bug this design exists
+to prevent — it makes the cell `UNRESOLVED` and shows both readings.
 
 **Character-level OCR.** Roster cells are separated by printed rules, not
 spaces, so Tesseract returns the whole row as one "word". Reading per character
@@ -84,31 +92,37 @@ and re-grouping by geometry is what makes per-day mapping possible.
   unmount.
 - pdf.js and tesseract.js are dynamically imported — the initial bundle is
   ~225 kB (72 kB gzipped); a photo user never downloads pdf.js.
-- The whole shift band is OCR'd in one pass; only weak cells get a second,
-  per-cell pass.
+- The whole shift band is OCR'd in one pass, then every cell is verified
+  individually against the same single worker: ~30 ms per cell, under 1 s for a
+  month.
 - Object URLs are revoked (image decode: immediately; export: after 60 s).
 
-Measured on the sample photo, desktop Chromium, production build:
-`dates 1635 ms · row 1101 ms · 3 cells retried 528 ms · total 3267 ms`.
-Text-PDF extraction: `8 ms`. **No mobile benchmark exists yet.**
+Measured on the sample photo, desktop Chromium:
+`dates 1457 ms · row 540 ms · 31 cells verified 934 ms · total 2936 ms`.
+Text-PDF extraction: `3 ms`. **No mobile benchmark exists yet.**
 
 ## Recognition accuracy — measured, not claimed
 
 On `samples/sample-roster-photo.jpg` (synthetic, 1.4° tilt, uneven lighting,
 JPEG q72), one employee row of 31 days:
 
-| result | count |
-| --- | --- |
-| correct | 28 |
-| unreadable (shown blank, needs a tap) | 1 |
-| wrong, flagged uncertain (54 %) | 1 |
-| **wrong, high confidence (99 %)** | **1** |
+| result | before hardening | after |
+| --- | --- | --- |
+| recognised and correct | 28 | 15 |
+| **recognised and wrong** | **2 (one at 99 %)** | **0** |
+| unresolved — shown blank, must be opened | 1 | 16 |
 
-The last row is the risk that matters: a cell can be confidently wrong, and the
-review matrix is the only thing standing between it and the calendar. This is
-why the product is built around correction rather than autonomy.
+The trade is deliberate. The old build read more days but slipped a wrong `F`
+into the calendar for a day that said `OFF`, at 99 % confidence, with nothing to
+warn the user. The new build never claims a reading that its two passes did not
+independently agree on, so the same photo now yields 15 machine readings — all
+correct — and 16 cells the user settles by tapping.
 
-The text-PDF sample recognises **31 of 31** days exactly.
+After the user resolves them, the exported file is exactly right: 23 events,
+8 free days excluded, the `OFF` on the 29th correctly absent, overnight and
+month-boundary events intact.
+
+The text-PDF sample recognises **31 of 31** days exactly, in one bulk-accept tap.
 
 ## Samples
 
@@ -143,7 +157,12 @@ Nothing below has been tested. Treat each as an open question, not a feature.
 - A band is a parallelogram, so it corrects tilt but not perspective. A photo
   taken at a steep angle will not align.
 - The alignment needs at least three readable day numbers.
-- `OFF` and other three-character codes are the weakest OCR case — they are wide
-  enough to cross column boundaries.
+- `OFF` and other three-character codes are still the weakest OCR case: they are
+  wide enough to touch the printed rules on both sides, and a glyph that merges
+  with a rule is indistinguishable from the rule itself. That no longer produces
+  a wrong event, but it does produce cells the user has to resolve by hand.
+- A whole-month photo therefore costs roughly a dozen taps today. Reducing that
+  without weakening the gate is the next recognition problem to solve, not a
+  reason to trust one pass.
 - If the OCR model is missing from a deployment, engine start times out after
   45 s with a readable error rather than hanging forever.

@@ -5,7 +5,13 @@ import { ShiftMatrixEditor } from './components/ShiftMatrixEditor';
 import { ShiftBottomSheet } from './components/ShiftBottomSheet';
 import { ExportStep } from './components/ExportStep';
 import type { CropRect, RosterPage } from './models/roster';
-import { RecognitionSource, type DayShift, type ShiftDef } from './models/shifts';
+import {
+  CellState,
+  isBulkAcceptable,
+  RecognitionSource,
+  type DayShift,
+  type ShiftDef,
+} from './models/shifts';
 import { isPdf, loadImageFile, releasePage } from './lib/imageLoader';
 import type { PdfTextPage } from './lib/pdfExtractor';
 import { defaultStrips } from './lib/stripCropper';
@@ -142,26 +148,37 @@ export default function App() {
     setDays((prev) => prev.map((d) => (d.dateStr === dateStr ? { ...d, ...patch } : d)));
   }, []);
 
+  /** The user chose a code themselves - that is an edit, not a reading. */
   const pickShift = useCallback(
     (dateStr: string, code: string) => {
       setDay(dateStr, {
         shiftCode: code,
         confidence: 1,
         source: RecognitionSource.USER_CONFIRMED,
-        confirmed: true,
+        state: CellState.EDITED,
       });
       setOpenDay(null);
     },
     [setDay],
   );
 
+  /** The user looked at what was read and accepted it as-is. */
+  const confirmShift = useCallback(
+    (dateStr: string) => {
+      setDay(dateStr, { state: CellState.CONFIRMED });
+      setOpenDay(null);
+    },
+    [setDay],
+  );
+
+  /** "Nothing on this day" is a decision too, so the cell is settled. */
   const clearShift = useCallback(
     (dateStr: string) => {
       setDay(dateStr, {
         shiftCode: null,
         confidence: 0,
         source: RecognitionSource.USER_CONFIRMED,
-        confirmed: false,
+        state: CellState.EDITED,
       });
       setOpenDay(null);
     },
@@ -175,9 +192,15 @@ export default function App() {
     [memory, persist],
   );
 
-  /** The explicit review step: everything still open is accepted as read. */
-  const confirmAll = useCallback(() => {
-    setDays((prev) => prev.map((d) => ({ ...d, confirmed: true })));
+  /**
+   * The bulk review step. It accepts only cells the machine settled and
+   * both passes agreed on; a disputed cell is deliberately out of its
+   * reach and has to be opened one by one.
+   */
+  const acceptRecognized = useCallback(() => {
+    setDays((prev) =>
+      prev.map((d) => (isBulkAcceptable(d) ? { ...d, state: CellState.CONFIRMED } : d)),
+    );
   }, []);
 
   const restart = useCallback(() => {
@@ -197,9 +220,10 @@ export default function App() {
         loadMs !== null ? `load ${Math.round(loadMs)} ms` : null,
         `dates ${Math.round(metrics.dateOcrMs)} ms`,
         `row ${Math.round(metrics.rowOcrMs)} ms`,
-        metrics.retriedCells
-          ? `${metrics.retriedCells} retried ${Math.round(metrics.retryOcrMs)} ms`
+        metrics.verifiedCells
+          ? `${metrics.verifiedCells} cells verified ${Math.round(metrics.cellOcrMs)} ms`
           : null,
+        metrics.disagreements ? `${metrics.disagreements} disagreed` : null,
         `total ${Math.round(metrics.totalMs)} ms`,
       ]
         .filter(Boolean)
@@ -249,7 +273,7 @@ export default function App() {
           warnings={warnings}
           metricsLine={metricsLine}
           onOpenDay={setOpenDay}
-          onConfirmAll={confirmAll}
+          onAcceptRecognized={acceptRecognized}
           onContinue={() => setStep('export')}
           onBack={() => setStep('align')}
         />
@@ -272,8 +296,14 @@ export default function App() {
           dateStr={openDayShift.dateStr}
           currentCode={openDayShift.shiftCode}
           rawText={openDayShift.rawText}
+          evidence={openDayShift.evidence}
           defs={memory.defs}
           onPick={(code) => pickShift(openDayShift.dateStr, code)}
+          onConfirm={
+            openDayShift.state === CellState.RECOGNIZED
+              ? () => confirmShift(openDayShift.dateStr)
+              : undefined
+          }
           onClear={() => clearShift(openDayShift.dateStr)}
           onCreate={createDef}
           onClose={() => setOpenDay(null)}

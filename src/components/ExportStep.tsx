@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
-import type { DayShift, ShiftDef } from '../models/shifts';
+import { isExportable, type DayShift, type ShiftDef } from '../models/shifts';
 import { generateIcs } from '../lib/icsGenerator';
 import { exportIcs, icsFilename, type ExportResult } from '../lib/calendarExport';
-import { isOffCode, unresolvedDays } from './ShiftMatrixEditor';
+import { disputedDays, isOffCode, openDays } from './ShiftMatrixEditor';
 
 interface Props {
   days: DayShift[];
@@ -34,18 +34,25 @@ export function ExportStep({
   const [failure, setFailure] = useState<string | null>(null);
   const [showIcs, setShowIcs] = useState(false);
 
-  const open = unresolvedDays(days);
+  // The gate: a cell reaches the calendar only after a human settles it.
+  // Recogniser confidence has no vote here, by design.
+  const open = openDays(days);
+  const disputed = disputedDays(days);
   const blocked = open.length > 0;
 
   const exportable = useMemo(
-    () => days.filter((d) => d.shiftCode && !isOffCode(d.shiftCode, defs)),
+    () =>
+      days.filter((d) => isExportable(d) && d.shiftCode && !isOffCode(d.shiftCode, defs)),
     [days, defs],
   );
   const offDays = useMemo(
-    () => days.filter((d) => isOffCode(d.shiftCode, defs)),
+    () => days.filter((d) => isExportable(d) && isOffCode(d.shiftCode, defs)),
     [days, defs],
   );
-  const skipped = useMemo(() => days.filter((d) => !d.shiftCode), [days]);
+  const skipped = useMemo(
+    () => days.filter((d) => isExportable(d) && !d.shiftCode),
+    [days],
+  );
 
   const ics = useMemo(
     () => (blocked ? '' : generateIcs(days, defs, { alarmMinutesBefore })),
@@ -68,14 +75,18 @@ export function ExportStep({
         <p className="muted">
           {exportable.length} shift{exportable.length === 1 ? '' : 's'} become events.{' '}
           {offDays.length} free day{offDays.length === 1 ? '' : 's'} and {skipped.length}{' '}
-          unread day{skipped.length === 1 ? '' : 's'} are left out.
+          blank day{skipped.length === 1 ? '' : 's'} are left out. Only days you settled
+          yourself are included.
         </p>
       </div>
 
       {blocked && (
         <div className="banner err">
-          {open.length} day{open.length === 1 ? '' : 's'} not confirmed yet. Go back and
-          review them — unconfirmed recognitions are never exported.
+          {open.length} day{open.length === 1 ? '' : 's'} not settled yet
+          {disputed.length > 0
+            ? `, ${disputed.length} of them unclear`
+            : ''}. Go back and review them. A reading the recogniser was sure about
+          still does not count as your decision.
         </div>
       )}
 
