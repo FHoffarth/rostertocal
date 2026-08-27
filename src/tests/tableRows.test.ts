@@ -198,6 +198,55 @@ describe('the printed header owns the columns', () => {
   });
 });
 
+describe('a partial header map fails closed', () => {
+  /**
+   * Found on a real low-resolution roster render: the recogniser read
+   * only 4 of the 8 printed headers, and because boundaries are
+   * midpoints between the headers that *were* found, the missing
+   * columns' values were served up inside their neighbours - a Length
+   * value appeared inside the End cell, a Start time inside Duty. Wrong
+   * evidence, presented confidently. It must refuse instead.
+   */
+  function partialHeaderLine(y: number): TableTextItem[] {
+    return [
+      at('Day', X.Day, y),
+      at('Duty', X.Duty, y),
+      at('End', X.End, y),
+      at('Activity', X.Activity, y),
+      at('sequence', X.Activity + 36, y),
+    ];
+  }
+
+  it('refuses when an expected column was not located', () => {
+    const r = extractTableRows([...partialHeaderLine(100), ...body()], OPTIONS);
+    expect(r.ok).toBe(false);
+    expect(r.rows).toEqual([]);
+    expect(r.missingHeaders.sort()).toEqual(
+      ['Length sch/act', 'Pairing', 'Rest after', 'Start'].sort(),
+    );
+    expect(r.diagnostic).toMatch(/would absorb their values/);
+  });
+
+  it('does not let a surviving column swallow a missing one', () => {
+    const r = extractTableRows([...partialHeaderLine(100), ...body()], OPTIONS);
+    // With End detected but "Length sch/act" not, the End cell would
+    // otherwise have contained both values.
+    expect(r.rows).toHaveLength(0);
+  });
+
+  it('reports every expected header as missing when no header is found', () => {
+    const r = extractTableRows(body(), OPTIONS);
+    expect(r.ok).toBe(false);
+    expect(r.missingHeaders).toEqual(HEADERS);
+  });
+
+  it('a complete header reports nothing missing', () => {
+    const r = extract();
+    expect(r.ok).toBe(true);
+    expect(r.missingHeaders).toEqual([]);
+  });
+});
+
 describe('rows carry what is printed and nothing more', () => {
   it('reads a duty that opens on one day', () => {
     const row = extract().rows.find((r) => r.cells.Day === '05 Mo')!;

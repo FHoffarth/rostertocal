@@ -54,6 +54,8 @@ export interface TableExtraction {
   rows: TableRow[];
   /** Text that sat under no column. Never silently reassigned. */
   unassigned: TableTextItem[];
+  /** Expected headers that were not found on the header line. */
+  missingHeaders: string[];
   /** Developer-only. */
   diagnostic?: string;
 }
@@ -61,7 +63,11 @@ export interface TableExtraction {
 /** Lines closer together than this share of a line height are one line. */
 export const LINE_TOLERANCE_RATIO = 0.6;
 
-/** A header needs at least this many of its labels present to be real. */
+/**
+ * How many labels must match before a line is even *considered* the
+ * header. Locating the line is allowed to be lenient; trusting its
+ * column map is not - see the all-labels rule in extractTableRows.
+ */
 export const MIN_HEADER_MATCHES = 3;
 
 function normalise(s: string): string {
@@ -209,17 +215,48 @@ export function extractTableRows(
       columns: [],
       rows: [],
       unassigned: [],
+      missingHeaders: [...options.headerLabels],
       diagnostic: `no header line matched at least ${MIN_HEADER_MATCHES} of: ${options.headerLabels.join(', ')}`,
     };
   }
 
   const { columns, headerLineIndex } = header;
+  const missingHeaders = options.headerLabels.filter(
+    (label) => !columns.some((c) => c.name === label),
+  );
+
+  /**
+   * Every expected header must be present, not merely enough of them.
+   *
+   * Column boundaries are midpoints between the headers that *were*
+   * found, so a header the recogniser missed does not leave a gap - its
+   * territory is absorbed by its neighbours, and the values printed
+   * under it are then reported inside the wrong column with no sign
+   * that anything went wrong. Observed on a low-resolution roster
+   * render: with "Length sch/act" undetected, its values were served up
+   * inside the "End" cell.
+   *
+   * Wrong evidence presented confidently is the one outcome worse than
+   * no evidence, so a partial header map fails closed.
+   */
+  if (missingHeaders.length > 0) {
+    return {
+      ok: false,
+      columns,
+      rows: [],
+      unassigned: [],
+      missingHeaders,
+      diagnostic: `header line found but ${missingHeaders.length} column(s) were not located: ${missingHeaders.join(', ')} - the remaining columns would absorb their values`,
+    };
+  }
+
   if (!columns.some((c) => c.name === options.rowAnchorColumn)) {
     return {
       ok: false,
       columns,
       rows: [],
       unassigned: [],
+      missingHeaders,
       diagnostic: `row anchor column "${options.rowAnchorColumn}" is not among the headers found`,
     };
   }
@@ -259,5 +296,5 @@ export function extractTableRows(
     unassigned.push(...probeUnassigned);
   }
 
-  return { ok: true, columns, rows, unassigned };
+  return { ok: true, columns, rows, unassigned, missingHeaders };
 }
